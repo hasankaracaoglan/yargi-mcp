@@ -180,3 +180,7 @@ redis-data/
 
 # Production logs
 logs/*.log.*
+Dockerfile
+Dockerfile
+fly.toml
+.github/workflows/fly-deploy.yml
