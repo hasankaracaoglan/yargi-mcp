@@ -243,10 +243,8 @@ def create_app(auth=None):
     global app
     if auth:
         app.auth = auth
-        app.name = "Yargı MCP Server"
         logger.info("MCP server created with Bearer authentication enabled")
     else:
-        app.name = "Yargı MCP Server"
         logger.info("MCP server created with standard capabilities...")
     
     token_counter = TokenCountingMiddleware()

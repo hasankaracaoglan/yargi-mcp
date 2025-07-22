@@ -58,21 +58,19 @@ except ImportError:
 auth_enabled = os.getenv("ENABLE_AUTH", "false").lower() == "true"
 bearer_auth = None
 
-if auth_enabled and CLERK_SECRET_KEY and CLERK_ISSUER:
+if CLERK_SECRET_KEY and CLERK_ISSUER:
     # Production: Use Clerk JWKS endpoint for token validation
-    # JWT token shows issuer as "https://clerk.yargimcp.com", so use that for JWKS
-    jwt_issuer = "https://clerk.yargimcp.com"
     bearer_auth = BearerAuthProvider(
-        jwks_uri=f"{jwt_issuer}/.well-known/jwks.json",
-        issuer=jwt_issuer,  # Enable issuer validation with correct issuer
+        jwks_uri=f"{CLERK_ISSUER}/.well-known/jwks.json",
+        issuer=None,  # Disable issuer validation - Clerk uses different issuer format
         algorithm="RS256",
-        audience=None,  # Disable audience validation - Clerk tokens vary
-        required_scopes=[]  # Disable scope validation - rely on token presence
+        audience=None,  # Disable audience validation - Clerk uses different audience format
+        required_scopes=[]  # Disable scope validation - Clerk JWT has ['read', 'search']
     )
-    logger.info(f"Bearer auth configured with Clerk JWKS: {jwt_issuer}/.well-known/jwks.json (issuer validation enabled)")
-elif auth_enabled:
-    # Development: Generate RSA key pair for testing when auth is enabled but no Clerk
-    logger.warning("Authentication enabled but no Clerk credentials - using development RSA key pair")
+    logger.info(f"Bearer auth configured with Clerk JWKS: {CLERK_ISSUER}/.well-known/jwks.json")
+else:
+    # Development: Generate RSA key pair for testing
+    logger.warning("No Clerk credentials found - using development RSA key pair")
     dev_key_pair = RSAKeyPair.generate()
     bearer_auth = BearerAuthProvider(
         public_key=dev_key_pair.public_key,
@@ -89,13 +87,10 @@ elif auth_enabled:
         scopes=["yargi.read", "yargi.search"],
         expires_in_seconds=3600 * 24  # 24 hours for development
     )
-    logger.debug("Development Bearer token generated (masked for security)")  # Don't log actual token
-else:
-    # Authentication disabled - allow unauthenticated access
-    logger.info("Authentication disabled - MCP server will allow unauthenticated access")
+    logger.info(f"Development Bearer token: {dev_token}")
 
 # Create MCP app with Bearer authentication
-mcp_server = create_app(auth=bearer_auth)
+mcp_server = create_app(auth=bearer_auth if auth_enabled else None)
 
 # Create MCP Starlette sub-application with root path - mount will add /mcp prefix
 mcp_app = mcp_server.http_app(path="/")
@@ -126,41 +121,13 @@ class UTF8JSONResponse(JSONResponse):
             separators=(",", ":"),
         ).encode("utf-8")
 
-# CORS middleware configuration - Allow Claude AI and Clerk domains
-cors_allowed_origins = ["*"]
-
 custom_middleware = [
     Middleware(
         CORSMiddleware,
-        allow_origins=cors_allowed_origins,
-        allow_credentials=True,  # Enable credentials for cross-origin requests
-        allow_methods=["GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "PATCH"],
-        allow_headers=[
-            "Content-Type", 
-            "Authorization", 
-            "X-Request-ID", 
-            "X-Session-ID",
-            "MCP-Protocol-Version",
-            "Mcp-Session-Id",
-            "x-api-key",           # Added from your config
-            "Last-Event-ID",       # Added from your config for SSE support
-            "Accept",
-            "Origin",
-            "User-Agent",
-            "DNT",
-            "Cache-Control",
-            "X-Mx-ReqToken",
-            "Keep-Alive",
-            "X-Requested-With",
-            "If-Modified-Since"
-        ],
-        expose_headers=[
-            "Content-Type",        # Added from your config
-            "Authorization", 
-            "x-api-key",           # Added from your config
-            "Mcp-Session-Id"
-        ],
-        max_age=86400,             # Added from your config (24 hours)
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
+        allow_headers=["Content-Type", "Authorization", "X-Request-ID", "X-Session-ID"],
     ),
 ]
 
@@ -637,7 +604,7 @@ async def mcp_token_endpoint(request: Request):
             content={"error": "invalid_request", "error_description": e.detail}
         )
 
-# Mount MCP app at /mcp/ with trailing slash (v0.1.6 approach)
+# Mount MCP app at /mcp/ with trailing slash
 app.mount("/mcp/", mcp_app)
 
 # Set the lifespan context after mounting

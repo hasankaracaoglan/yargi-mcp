@@ -72,24 +72,14 @@ async def get_oauth_metadata():
     return JSONResponse({
         "issuer": BASE_URL,
         "authorization_endpoint": f"{BASE_URL}/auth/login",
-        "authorization_endpoint_simple": f"{BASE_URL}/auth/login-simple",  # Simple request endpoint
         "token_endpoint": f"{BASE_URL}/token",
-        "token_endpoint_simple": f"{BASE_URL}/token-simple",  # Simple request endpoint
         "registration_endpoint": f"{BASE_URL}/register",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": ["read", "search", "openid", "profile", "email"],
-        "service_documentation": f"{BASE_URL}/mcp/",
-        "preflight_free_endpoints": {
-            "authorization": f"{BASE_URL}/auth/login-simple",
-            "token": f"{BASE_URL}/token-simple"
-        },
-        "clerk_optimization": {
-            "simple_requests": True,
-            "cors_preflight_bypass": True,
-            "performance_optimized": True
+        "service_documentation": f"{BASE_URL}/mcp/"
         }
     })
 
