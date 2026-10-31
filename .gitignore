@@ -218,8 +218,6 @@ simple_test.py
 analyze_anayasa_html.py
 CLAUDE.md
 
-# Yerel karar metni önbelleği (veri, kod değil)
-semantic_search/disk_document_cache.json
 
 # Künye kaydı (SQLite) ve diğer yerel veriler
 veri/
