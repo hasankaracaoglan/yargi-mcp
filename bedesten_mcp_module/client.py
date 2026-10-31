@@ -104,7 +104,7 @@ class BedestenApiClient:
     #     local bucket before returning a structured 429 to the caller)
     _DEFAULT_CAPACITY = int(os.getenv("BEDESTEN_RATE_CAPACITY", "1"))
     _DEFAULT_REFILL_S = float(os.getenv("BEDESTEN_RATE_REFILL_S", "3.5"))
-    _DEFAULT_MAX_WAIT_S = float(os.getenv("BEDESTEN_RATE_MAX_WAIT_S", "8.0"))
+    _DEFAULT_MAX_WAIT_S = float(os.getenv("BEDESTEN_RATE_MAX_WAIT_S", "90.0"))
 
     def __init__(self, request_timeout: float = 60.0):
         self.http_client = httpx.AsyncClient(

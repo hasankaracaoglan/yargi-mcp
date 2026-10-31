@@ -3,9 +3,11 @@
 from .embedder import (
     OpenRouterEmbedder,
     LocalEmbedder,
+    FastEmbedEmbedder,
     get_embedder,
     is_openrouter_available,
     is_local_embedding_configured,
+    is_fastembed_available,
     is_semantic_search_available,
 )
 from .vector_store import VectorStore
@@ -14,9 +16,11 @@ from .processor import DocumentProcessor
 __all__ = [
     'OpenRouterEmbedder',
     'LocalEmbedder',
+    'FastEmbedEmbedder',
     'get_embedder',
     'is_openrouter_available',
     'is_local_embedding_configured',
+    'is_fastembed_available',
     'is_semantic_search_available',
     'VectorStore',
     'DocumentProcessor',

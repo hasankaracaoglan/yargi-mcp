@@ -1,3 +1,4 @@
+from semantic_search.document_cache import doc_cache
 # mcp_server_main.py
 
 # --- MCP Spec Compliance: Reject null JSON-RPC IDs ---
@@ -1336,7 +1337,7 @@ YANLIŞ KULLANIM:
                     search_results = await bedesten_client_instance.search_documents(
                         BedestenSearchRequest(
                             data=BedestenSearchData(
-                                phrase=initial_keyword,
+                                phrase=(initial_keyword if ("\"" in initial_keyword or "AND" in initial_keyword or "OR" in initial_keyword or "+" in initial_keyword) else f"\"{initial_keyword.strip()}\""),
                                 itemTypeList=[court_type],
                                 pageSize=per_court_limit,
                                 pageNumber=1
@@ -1370,9 +1371,17 @@ YANLIŞ KULLANIM:
 
             for i, decision in enumerate(decisions_to_process):
                 try:
-                    doc = await bedesten_client_instance.get_document_as_markdown(decision.documentId)
+                    cached_text = doc_cache.get(decision.documentId)
+                    if cached_text:
+                        markdown_text = cached_text
+                    else:
+                        await asyncio.sleep(0.1)
+                        doc = await bedesten_client_instance.get_document_as_markdown(decision.documentId)
+                        markdown_text = doc.markdown_content if doc else None
+                        if markdown_text:
+                            doc_cache.set(decision.documentId, markdown_text)
 
-                    if doc.markdown_content:
+                    if markdown_text:
                         metadata = {
                             "document_id": decision.documentId,
                             "birim_adi": decision.birimAdi,
@@ -1384,7 +1393,7 @@ YANLIŞ KULLANIM:
 
                         chunks = processor.process_document(
                             document_id=decision.documentId,
-                            text=doc.markdown_content,
+                            text=markdown_text,
                             metadata=metadata
                         )
 
@@ -1476,7 +1485,7 @@ YANLIŞ KULLANIM:
                 "query": query,
                 "initial_keyword": initial_keyword,
                 "total_documents_processed": len(documents_data),
-                "embedding_model": embedder.model,
+                "embedding_model": getattr(embedder, "model", getattr(embedder, "model_name", "unknown")),
                 "embedding_dimension": embedder.dimension,
                 "results": formatted_results,
                 "stats": {
@@ -1494,8 +1503,122 @@ YANLIŞ KULLANIM:
                 "results": []
             }
 
-
-# --- MCP Tools for Sayıştay (Turkish Court of Accounts) ---
+@app.tool(
+    description="Akıllı 100-Liste / 20-Tam Metin Karar Arama Aracı. Bedesten API'sinden 100 adete kadar karar künyesini çeker, ardından hedeflenen 20 kararın tam metinlerini diske önbellekleyerek ve hızlı asenkron yapı ile indirip yapay zeka analizine hazır halde sunar.",
+    annotations={
+        "readOnlyHint": True,
+        "openWorldHint": True,
+        "idempotentHint": True
+    }
+)
+async def search_smart_decisions(
+    phrase: str = Field(..., description="Arama terimi veya olayın özet cümlesi."),
+    court_types: List[BedestenCourtTypeEnum] = Field(
+        default=["YARGITAYKARARI"],
+        description="Mahkeme türleri: YARGITAYKARARI, DANISTAYKARAR, YERELHUKUK, ISTINAFHUKUK, KYB (Varsayılan: YARGITAYKARARI)"
+    ),
+    birimAdi: BirimAdiEnum = Field(
+        default="ALL",
+        description="Özel Daire Filtresi (Örn: H4 - 4. Hukuk Dairesi, H3 - 3. Hukuk Dairesi, H12 - 12. Hukuk Dairesi vb. Varsayılan: ALL)"
+    ),
+    target_full_texts: int = Field(
+        default=20, ge=1, le=50,
+        description="Tam metni indirilip analiz edilecek karar sayısı (1-50, Varsayılan: 20)"
+    )
+) -> Dict[str, Any]:
+    """
+    Bedesten API'sinden 100 karar künyesini çeker, belirtilen target_full_texts (varsayılan 20) kadar kararın tam metinlerini asenkron ve önbellekli şekilde indirip döndürür.
+    """
+    logger.info(f"search_smart_decisions tool called with phrase: {phrase}")
+    
+    try:
+        if not isinstance(court_types, list):
+            court_types = ["YARGITAYKARARI"]
+        if not isinstance(birimAdi, str):
+            birimAdi = "ALL"
+        if not isinstance(target_full_texts, int):
+            target_full_texts = 20
+            
+        court_types_str = [c.value if hasattr(c, "value") else str(c) for c in court_types]
+        birim_adi_str = birimAdi.value if hasattr(birimAdi, "value") else str(birimAdi)
+        
+        # Step 1: Search metadata up to 100 items via pages safely
+        all_decisions = []
+        for page_num in range(1, 11):
+            try:
+                if page_num > 1:
+                    await asyncio.sleep(0.3)
+                search_request = BedestenSearchRequest(
+                    data=BedestenSearchData(
+                        phrase=phrase,
+                        itemTypeList=court_types_str,
+                        birimAdi=birim_adi_str,
+                        pageNumber=page_num,
+                        pageSize=10
+                    )
+                )
+                resp = await bedesten_client_instance.search_documents(search_request)
+                emsal_list = resp.data.emsalKararList if hasattr(resp.data, 'emsalKararList') and resp.data.emsalKararList is not None else []
+                if not emsal_list:
+                    break
+                all_decisions.extend(emsal_list)
+                if len(all_decisions) >= 100 or len(emsal_list) < 10:
+                    break
+            except Exception as e:
+                logger.warning(f"Pagination stop at page {page_num}: {e}")
+                break
+        
+        if not all_decisions:
+            return {
+                "status": "no_results",
+                "message": "No decisions found matching the query",
+                "total_listed": 0,
+                "decisions": []
+            }
+            
+        decisions_to_fetch = all_decisions[:target_full_texts]
+        full_text_results = []
+        
+        for i, decision in enumerate(decisions_to_fetch):
+            try:
+                cached_text = doc_cache.get(decision.documentId)
+                if cached_text:
+                    markdown_text = cached_text
+                else:
+                    await asyncio.sleep(0.1)
+                    doc = await bedesten_client_instance.get_document_as_markdown(decision.documentId)
+                    markdown_text = doc.markdown_content if doc else None
+                    if markdown_text:
+                        doc_cache.set(decision.documentId, markdown_text)
+                
+                if markdown_text:
+                    full_text_results.append({
+                        "document_id": decision.documentId,
+                        "birim_adi": decision.birimAdi,
+                        "esas_no": decision.esasNo,
+                        "karar_no": decision.kararNo,
+                        "karar_tarihi": decision.kararTarihiStr,
+                        "source_url": f"https://mevzuat.adalet.gov.tr/ictihat/{decision.documentId}",
+                        "markdown_content": markdown_text
+                    })
+            except Exception as e:
+                logger.warning(f"Error fetching decision {decision.documentId}: {e}")
+                
+        return {
+            "status": "success",
+            "phrase": phrase,
+            "total_listed": len(all_decisions),
+            "total_full_texts_fetched": len(full_text_results),
+            "decisions": full_text_results
+        }
+        
+    except Exception as e:
+        logger.exception(f"Error in search_smart_decisions: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "decisions": []
+        }# --- MCP Tools for Sayıştay (Turkish Court of Accounts) ---
 
 # DEACTIVATED TOOL - Use search_sayistay_unified instead
 # @app.tool(

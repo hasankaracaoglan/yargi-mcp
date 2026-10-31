@@ -69,9 +69,18 @@ def is_local_embedding_configured() -> bool:
     return os.getenv("EMBEDDING_PROVIDER", "").strip().lower() == "local"
 
 
+def is_fastembed_available() -> bool:
+    """Check if fastembed package is available locally."""
+    try:
+        import fastembed
+        return True
+    except ImportError:
+        return False
+
+
 def is_semantic_search_available() -> bool:
-    """Returns True if any embedding provider is configured."""
-    return is_local_embedding_configured() or is_openrouter_available()
+    """Returns True if any embedding provider is configured or fastembed is installed."""
+    return is_local_embedding_configured() or is_openrouter_available() or is_fastembed_available()
 
 
 def _coerce_dimension(value, env_name: str, default: int) -> int:
@@ -327,22 +336,69 @@ class LocalEmbedder(_BaseOpenAICompatibleEmbedder):
         )
 
 
+class FastEmbedEmbedder:
+    """
+    Zero-config local embedder using FastEmbed (ONNX models).
+    Runs ONNX models (default: BAAI/bge-small-en) locally with zero external API dependencies.
+    """
+
+    def __init__(self, model_name: Optional[str] = None):
+        try:
+            from fastembed import TextEmbedding
+        except ImportError:
+            raise ImportError("fastembed package is required. Install with: pip install fastembed")
+
+        self.model_name = model_name or os.getenv("FASTEMBED_MODEL") or "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+        self.model = self.model_name
+        logger.info(f"Initializing FastEmbedLocalEmbedder with model: {self.model_name}")
+        self._embedding_model = TextEmbedding(model_name=self.model_name)
+        test_emb = list(self._embedding_model.embed(["test"]))[0]
+        self.dimension = len(test_emb)
+        self.prompt_style = "raw"
+        logger.info(f"FastEmbedEmbedder initialized (dimension={self.dimension})")
+
+    def encode_query(self, query: str, task: str = "search result") -> np.ndarray:
+        text = f"query: {query}" if "e5" in self.model_name else query
+        embs = list(self._embedding_model.embed([text]))[0]
+        embedding = np.array(embs, dtype=np.float32)
+        norm = np.linalg.norm(embedding)
+        return embedding / norm if norm > 0 else embedding
+
+    def encode_documents(self, documents: List[str], titles: Optional[List[str]] = None) -> np.ndarray:
+        if not documents:
+            return np.array([])
+        embs = list(self._embedding_model.embed(documents))
+        embeddings = np.array(embs, dtype=np.float32)
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        return embeddings / (norms + 1e-8)
+
+    def compute_similarity(self, query_embedding: np.ndarray, document_embeddings: np.ndarray) -> np.ndarray:
+        if len(query_embedding.shape) == 1:
+            query_embedding = query_embedding.reshape(1, -1)
+        return np.dot(document_embeddings, query_embedding.T).squeeze()
+
+
 def get_embedder():
     """
-    Factory that picks the embedder based on EMBEDDING_PROVIDER.
+    Factory that picks the embedder based on configuration / package availability.
 
     - ``EMBEDDING_PROVIDER=local`` -> ``LocalEmbedder``
-    - otherwise -> ``OpenRouterEmbedder`` (requires OPENROUTER_API_KEY)
-
-    Raises:
-        ValueError: If no provider is configured (neither local nor OpenRouter).
+    - ``EMBEDDING_PROVIDER=fastembed`` or fastembed installed -> ``FastEmbedEmbedder``
+    - ``OPENROUTER_API_KEY`` configured -> ``OpenRouterEmbedder``
     """
-    if is_local_embedding_configured():
+    provider = os.getenv("EMBEDDING_PROVIDER", "").strip().lower()
+    if provider == "local":
         return LocalEmbedder()
+    if provider == "fastembed":
+        return FastEmbedEmbedder()
+    if provider == "openrouter" and is_openrouter_available():
+        return OpenRouterEmbedder()
+    if is_fastembed_available():
+        return FastEmbedEmbedder()
     if is_openrouter_available():
         return OpenRouterEmbedder()
     raise ValueError(
         "No embedding provider configured. Set OPENROUTER_API_KEY for hosted "
-        "embeddings, or EMBEDDING_PROVIDER=local (with LOCAL_EMBEDDING_* "
-        "env vars) for a local OpenAI-compatible server like Ollama."
+        "embeddings, or EMBEDDING_PROVIDER=local for a local OpenAI server, "
+        "or install fastembed for zero-config local embeddings."
     )
