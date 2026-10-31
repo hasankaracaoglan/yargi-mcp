@@ -266,6 +266,7 @@ from bedesten_mcp_module.models import (
 )
 from bedesten_mcp_module.enums import BirimAdiEnum
 from bedesten_mcp_module.kunye import format_kunye
+from bedesten_mcp_module.sorgu import rewrite_phrase
 
 # Semantic Search Module Imports (enabled if any embedding provider is configured)
 from semantic_search.embedder import is_semantic_search_available, is_local_embedding_configured
@@ -1046,9 +1047,9 @@ async def get_rekabet_kurumu_document(
 @app.tool(
     description=(
         "Use this for Turkish court decision records from Yargıtay, Danıştay, Local Courts, Appeals Courts, and KYB via Bedesten. "
-        "Prefer narrow court_types over all courts. pageSize is intentionally fixed to 10 results per page. "
-        "Bedesten is upstream rate-limited; avoid parallel repeated calls and wait retry_after seconds after 429 responses. "
-        "Each decision carries kunye, the official citation to use as is."
+        "Returns 10 decisions per page as documentId + kunye (official citation, use as is). "
+        "Prefer narrow court_types and a birimAdi chamber filter. "
+        "Bedesten is upstream rate-limited; avoid parallel repeated calls and wait retry_after seconds after 429 responses."
     ),
     annotations={
         "readOnlyHint": True,
@@ -1058,17 +1059,14 @@ async def get_rekabet_kurumu_document(
 )
 async def search_bedesten_unified(
     ctx: Context,
-    phrase: str = Field(..., description="""Search query in Turkish. SUPPORTED OPERATORS:
-• Simple: "mülkiyet hakkı" (finds both words)
-• Exact phrase: "\"mülkiyet hakkı\"" (finds exact phrase)  
-• Required term: "+mülkiyet hakkı" (must contain mülkiyet)
-• Exclude term: "mülkiyet -kira" (contains mülkiyet but not kira)
-• Boolean AND: "mülkiyet AND hak" (both terms required)
-• Boolean OR: "mülkiyet OR tapu" (either term acceptable)
-• Boolean NOT: "mülkiyet NOT satış" (contains mülkiyet but not satış)
-• Esas/karar no: "2022/8423 AND 2023/291" (slashed terms are sent as phrases "2022 8423"; a raw '/' returns no data)
-NOTE: Wildcards (*,?), regex patterns (/regex/), fuzzy search (~), and proximity search are NOT supported.
-For best results, use exact phrases with quotes for legal terms."""),
+    phrase: str = Field(..., description="""Search query in Turkish. Bedesten matches whole word forms only (no stemming): taahhütname does NOT match taahhütnamesi.
+• kök*: searches the word's Turkish case/possessive/plural forms: taahhütname* -> taahhütname, taahhütnamesi, taahhütnameye, ... Write the dictionary form; add synonyms yourself with OR.
+• AND / OR / NOT with parentheses: tahliye* AND (taahhütname* OR taahhüt*)
+• Words without operators match ANY of them (OR) and return thousands of loose hits: join required terms with AND.
+• Exact phrase "\"tahliye taahhüdü\"": only that form in that order, misses other suffixes; use sparingly.
+• +required / -excluded: +tahliye -kira
+• Esas/karar no: 2022/8423 AND 2023/291 (sent as phrases "2022 8423"; a raw '/' returns no data)
+Not supported: regex, fuzzy (~), proximity; * only at the end of a word."""),
     court_types: List[BedestenCourtTypeEnum] = Field(
         default=["YARGITAYKARARI", "DANISTAYKARAR"],
         description="Court types: YARGITAYKARARI, DANISTAYKARAR, YERELHUKUK, ISTINAFHUKUK, KYB"
@@ -1081,10 +1079,14 @@ For best results, use exact phrases with quotes for legal terms."""),
         • Danıştay: D1-D17 (1-17. Daire), DBGK (Büyük Gen.Kur.), IDDK (İdare Dava Daireleri Kurulu), VDDK (Vergi Dava Daireleri Kurulu), IBK (İçtihatları Birleştirme Kurulu), IIK (İdari İşler Kurulu), DBK (Başkanlar Kurulu), AYIM (Askeri Yüksek İdare Mahkemesi), AYIM1-3 (Askeri Yüksek İdare Mahkemesi 1-3. Daire)
         """),
     kararTarihiStart: str = Field("", description="Start date (ISO 8601 format)"),
-    kararTarihiEnd: str = Field("", description="End date (ISO 8601 format)")
+    kararTarihiEnd: str = Field("", description="End date (ISO 8601 format)"),
+    sort_by: Literal["relevance", "date"] = Field(
+        "relevance",
+        description="relevance: decisions centred on the terms first (may be old; add kararTarihiStart for current law). date: newest first."
+    )
 ) -> dict:
     """Search Turkish legal databases via unified Bedesten API."""
-    
+
     pageSize = 10  # Default value
     
     # Convert date formats if provided
@@ -1099,96 +1101,88 @@ For best results, use exact phrases with quotes for legal terms."""),
         if 'T' not in kararTarihiEnd:
             kararTarihiEnd = f"{kararTarihiEnd}T23:59:59.999Z"
     
+    sent_phrase, query_rewrites = rewrite_phrase(phrase)
     search_data = BedestenSearchData(
         pageSize=pageSize,
         pageNumber=pageNumber,
         itemTypeList=court_types,
-        phrase=phrase,
+        phrase=sent_phrase,
         birimAdi=birimAdi,
         kararTarihiStart=kararTarihiStart,
-        kararTarihiEnd=kararTarihiEnd
+        kararTarihiEnd=kararTarihiEnd,
+        # No sort field = Bedesten's relevance order. Measured 2026-10-31 on
+        # 3. HD: the top 5 mention the terms 6-10x more often than date order.
+        sortFields=["KARAR_TARIHI"] if sort_by == "date" else []
     )
-    
+
     search_request = BedestenSearchRequest(data=search_data)
-    
-    logger.info(f"Searching bedesten: phrase='{phrase}', court_types={court_types}, birimAdi='{birimAdi}', page={pageNumber}")
-    
+
+    logger.info(f"Searching bedesten: phrase='{sent_phrase}', court_types={court_types}, birimAdi='{birimAdi}', page={pageNumber}, sort={sort_by}")
+
+    def empty_result(**extra) -> dict:
+        result = {
+            "total_records": 0,
+            "requested_page": pageNumber,
+            "searched_courts": court_types,
+            "decisions": [],
+            **extra,
+        }
+        if query_rewrites:
+            result["query_rewrites"] = query_rewrites
+        return result
+
     try:
         response = await bedesten_client_instance.search_documents(search_request)
 
         if response.data is None:
-            return {
-                "decisions": [],
-                "total_records": 0,
-                "requested_page": pageNumber,
-                "page_size": pageSize,
-                "searched_courts": court_types,
-                "error": "No data returned from Bedesten API"
-            }
+            return empty_result(error="No data returned from Bedesten API")
 
         # Add null safety checks for response.data fields
         emsal_karar_list = response.data.emsalKararList if hasattr(response.data, 'emsalKararList') and response.data.emsalKararList is not None else []
         total_records = response.data.total if hasattr(response.data, 'total') and response.data.total is not None else 0
 
         result = {
+            "total_records": total_records,
+            "requested_page": pageNumber,
+            "total_pages": (total_records + pageSize - 1) // pageSize,
+            "searched_courts": court_types,
             "decisions": [
                 {
+                    "documentId": d.documentId,
                     "kunye": format_kunye(d.itemType.name, d.birimAdi, d.esasNo, d.kararNo, d.kararTarihiStr),
-                    **d.model_dump(),
                 }
                 for d in emsal_karar_list
             ],
-            "total_records": total_records,
-            "requested_page": pageNumber,
-            "page_size": pageSize,
-            "searched_courts": court_types
         }
-        # search_documents rewrites slashed terms in place; show what was sent
-        if search_request.data.phrase != phrase:
-            result["applied_phrase"] = search_request.data.phrase
+        if query_rewrites:
+            result["query_rewrites"] = query_rewrites
         return result
     except BedestenRateLimited as e:
         retry_after = f"{e.retry_after:.1f}"
         logger.warning(f"Bedesten local rate-limit bucket full for search; retry-after={retry_after}s")
-        return {
-            "decisions": [],
-            "total_records": 0,
-            "requested_page": pageNumber,
-            "page_size": pageSize,
-            "searched_courts": court_types,
-            "error": "rate_limit_exceeded",
-            "status_code": 429,
-            "retry_after": retry_after,
-            "message": (
+        return empty_result(
+            error="rate_limit_exceeded",
+            status_code=429,
+            retry_after=retry_after,
+            message=(
                 "Bedesten istemci tarafı eşzamanlılık sınırına ulaşıldı "
                 "(yerel token-bucket dolu). Lütfen kısa bir süre bekleyip "
-                "aramayı tekrar deneyin. Yargı MCP'nin daha hızlı ve "
-                "profesyonel versiyonunu test etmek için beta sürümüne "
-                "kaydolabilirsiniz: "
-                "https://yargi.betaspacestudio.com"
+                "aramayı tekrar deneyin."
             ),
-        }
+        )
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 429:
             retry_after = e.response.headers.get("Retry-After", "")
             logger.warning(f"Bedesten API rate limit (429) for search; retry-after={retry_after!r}")
-            return {
-                "decisions": [],
-                "total_records": 0,
-                "requested_page": pageNumber,
-                "page_size": pageSize,
-                "searched_courts": court_types,
-                "error": "rate_limit_exceeded",
-                "status_code": 429,
-                "retry_after": retry_after,
-                "message": (
+            return empty_result(
+                error="rate_limit_exceeded",
+                status_code=429,
+                retry_after=retry_after,
+                message=(
                     "Bedesten API rate limit aşıldı (HTTP 429 Too Many Requests). "
-                    "Lütfen kısa bir süre bekleyip aramayı tekrar deneyin. "
-                    "Yargı MCP'nin daha hızlı ve profesyonel versiyonunu test "
-                    "etmek için beta sürümüne kaydolabilirsiniz: "
-                    "https://yargi.betaspacestudio.com"
+                    "Lütfen kısa bir süre bekleyip aramayı tekrar deneyin."
                 ),
-            }
+            )
         logger.exception("Error in tool 'search_bedesten_unified'")
         raise
     except Exception:
@@ -1224,10 +1218,7 @@ async def get_bedesten_document_markdown(
         message = (
             "Bedesten istemci tarafı eşzamanlılık sınırına ulaşıldı "
             "(yerel token-bucket dolu). Lütfen kısa bir süre bekleyip "
-            "belgeyi tekrar talep edin. Yargı MCP'nin daha hızlı ve "
-            "profesyonel versiyonunu test etmek için beta sürümüne "
-            "kaydolabilirsiniz: "
-            "https://yargi.betaspacestudio.com "
+            "belgeyi tekrar talep edin. "
             f"Retry-After: {retry_after}"
         )
         return BedestenDocumentMarkdown(
@@ -1242,10 +1233,7 @@ async def get_bedesten_document_markdown(
             logger.warning(f"Bedesten API rate limit (429) for document {documentId}; retry-after={retry_after!r}")
             message = (
                 "Bedesten API rate limit aşıldı (HTTP 429 Too Many Requests). "
-                "Lütfen kısa bir süre bekleyip belgeyi tekrar talep edin. "
-                "Yargı MCP'nin daha hızlı ve profesyonel versiyonunu test "
-                "etmek için beta sürümüne kaydolabilirsiniz: "
-                "https://yargi.betaspacestudio.com"
+                "Lütfen kısa bir süre bekleyip belgeyi tekrar talep edin."
             )
             if retry_after:
                 message += f" Retry-After: {retry_after}"

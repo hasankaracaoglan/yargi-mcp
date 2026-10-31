@@ -63,30 +63,6 @@ def format_kunye(
     return ", ".join(parts) if parts else None
 
 
-_QUOTED = re.compile(r'"[^"]*"')
-_SLASHED = re.compile(r"\w+(?:/\w+)+")
-
-
-def normalize_phrase(phrase: str) -> str:
-    """Rewrite slashed terms such as 2022/8423 as the phrase "2022 8423".
-
-    Bedesten returns no data at all (data: null) for a query containing '/',
-    even escaped; the same tokens as a phrase match. Measured 2026-10-31:
-    '2022/8423 AND 2023/291' -> null, '"2022 8423" AND "2023 291"' -> the decision.
-    """
-    out, pos = [], 0
-    for m in _QUOTED.finditer(phrase):
-        out.append(_quote_slashed(phrase[pos:m.start()]))
-        out.append(m.group(0).replace("/", " "))
-        pos = m.end()
-    out.append(_quote_slashed(phrase[pos:]))
-    return "".join(out)
-
-
-def _quote_slashed(segment: str) -> str:
-    return _SLASHED.sub(lambda m: '"' + m.group(0).replace("/", " ") + '"', segment)
-
-
 # Decision headers: Yargıtay/Danıştay "2022/8423 E. , 2023/291 K." and BAM
 # "Esas-Karar No: 2025/240 - 2026/1178" or "ESAS|DOSYA NO : ... KARAR NO : ...".
 _HEADER_PATTERNS = (

@@ -79,8 +79,16 @@ def is_fastembed_available() -> bool:
 
 
 def is_semantic_search_available() -> bool:
-    """Returns True if any embedding provider is configured or fastembed is installed."""
-    return is_local_embedding_configured() or is_openrouter_available() or is_fastembed_available()
+    """Returns True only when an embedding provider is explicitly configured.
+
+    An installed fastembed no longer enables the tool by itself: re-ranking the
+    10 results per court type that Bedesten returns adds little. Kept for a
+    future local corpus; enable with EMBEDDING_PROVIDER=fastembed (or local /
+    OPENROUTER_API_KEY) in the MCP server env.
+    """
+    if os.getenv("EMBEDDING_PROVIDER", "").strip().lower() == "fastembed":
+        return is_fastembed_available()
+    return is_local_embedding_configured() or is_openrouter_available()
 
 
 def _coerce_dimension(value, env_name: str, default: int) -> int:

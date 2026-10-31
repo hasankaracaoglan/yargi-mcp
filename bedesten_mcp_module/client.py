@@ -17,7 +17,8 @@ from .models import (
     BedestenDocumentMarkdown, BedestenDocumentRequestData
 )
 from .enums import get_full_birim_adi
-from .kunye import court_name, format_kunye, get_store, normalize_phrase, numbers_from_header
+from .kunye import court_name, format_kunye, get_store, numbers_from_header
+from .sorgu import rewrite_phrase
 
 logger = logging.getLogger(__name__)
 
@@ -165,10 +166,12 @@ class BedestenApiClient:
         if original_birim_adi != "ALL":
             logger.info(f"BedestenApiClient: Mapped birimAdi '{original_birim_adi}' to '{mapped_birim_adi}'")
 
-        normalized_phrase = normalize_phrase(search_request.data.phrase)
-        if normalized_phrase != search_request.data.phrase:
-            logger.info(f"BedestenApiClient: Rewrote slashed terms in phrase to {normalized_phrase!r}")
-            search_request.data.phrase = normalized_phrase
+        # Safety net for callers that pass raw phrases ('/' returns no data,
+        # kök* expands); idempotent for phrases the tools already rewrote.
+        rewritten_phrase, _ = rewrite_phrase(search_request.data.phrase)
+        if rewritten_phrase != search_request.data.phrase:
+            logger.info(f"BedestenApiClient: Rewrote phrase to {rewritten_phrase!r}")
+            search_request.data.phrase = rewritten_phrase
 
         try:
             # Create request dict and remove birimAdi if empty
