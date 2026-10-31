@@ -18,11 +18,15 @@ from .models import (
 )
 from .enums import get_full_birim_adi
 from .kunye import court_name, format_kunye, get_store, numbers_from_header
+from .onbellek import get_text_cache
 from .sorgu import rewrite_phrase
 
 logger = logging.getLogger(__name__)
 
 ALL_COURT_TYPES = ["YARGITAYKARARI", "DANISTAYKARAR", "YERELHUKUK", "ISTINAFHUKUK", "KYB"]
+
+# Prefixes of the texts the converters return instead of raising; never cached.
+CONVERSION_ERROR_PREFIXES = ("Error converting", "Unsupported content type")
 
 KUNYE_NOT_FOUND_NOTE = (
     "Resmi künye bulunamadı. Metindeki tarihler alt mahkeme/BAM kararlarına ait "
@@ -110,11 +114,14 @@ class BedestenApiClient:
     # 3.5s spacing (no burst, ~14% safety margin). Override via env:
     #   BEDESTEN_RATE_CAPACITY (default 1)
     #   BEDESTEN_RATE_REFILL_S (default 3.5; seconds per token)
-    #   BEDESTEN_RATE_MAX_WAIT_S (default 8.0; max seconds to wait in the
+    #   BEDESTEN_RATE_MAX_WAIT_S (default 90.0; max seconds to wait in the
     #     local bucket before returning a structured 429 to the caller)
+    #   BEDESTEN_429_RETRIES (default 2; retries after a 429, each waiting
+    #     the server's Retry-After)
     _DEFAULT_CAPACITY = int(os.getenv("BEDESTEN_RATE_CAPACITY", "1"))
     _DEFAULT_REFILL_S = float(os.getenv("BEDESTEN_RATE_REFILL_S", "3.5"))
     _DEFAULT_MAX_WAIT_S = float(os.getenv("BEDESTEN_RATE_MAX_WAIT_S", "90.0"))
+    _DEFAULT_429_RETRIES = int(os.getenv("BEDESTEN_429_RETRIES", "2"))
 
     def __init__(self, request_timeout: float = 60.0):
         self.http_client = httpx.AsyncClient(
@@ -151,7 +158,20 @@ class BedestenApiClient:
         logger.warning(
             f"BedestenApiClient: 429 on {op}; bucket paused {retry_after + 0.5:.1f}s"
         )
-    
+
+    async def _post(self, endpoint: str, payload: dict, op: str) -> httpx.Response:
+        """POST through the shared bucket. After a 429 the bucket pauses for
+        Retry-After and the request is retried, so a long run (100 künye,
+        20 texts) does not stop at the first throttle."""
+        for _ in range(1 + self._DEFAULT_429_RETRIES):
+            await self._bucket.acquire(max_wait=self._DEFAULT_MAX_WAIT_S)
+            response = await self.http_client.post(endpoint, json=payload)
+            if response.status_code != 429:
+                break
+            self._handle_429(response, op)
+        response.raise_for_status()
+        return response
+
     async def search_documents(self, search_request: BedestenSearchRequest) -> BedestenSearchResponse:
         """
         Search for documents using Bedesten API.
@@ -179,14 +199,7 @@ class BedestenApiClient:
             if not request_dict["data"]["birimAdi"]:  # Remove if empty string
                 del request_dict["data"]["birimAdi"]
             
-            await self._bucket.acquire(max_wait=self._DEFAULT_MAX_WAIT_S)
-            response = await self.http_client.post(
-                self.SEARCH_ENDPOINT,
-                json=request_dict
-            )
-            if response.status_code == 429:
-                self._handle_429(response, "search")
-            response.raise_for_status()
+            response = await self._post(self.SEARCH_ENDPOINT, request_dict, "search")
             response_json = response.json()
 
             # Parse and return the response
@@ -211,24 +224,30 @@ class BedestenApiClient:
         Handles both HTML (text/html) and PDF (application/pdf) content types.
         The official künye is attached from recorded search results; with
         ``resolve_kunye`` an unrecorded document costs one extra search request.
+        Texts are served from the local cache when present (no request).
         """
+        cached = self._cached_text(document_id)
+        if cached is not None:
+            markdown_content, mime_type = cached
+            document = BedestenDocumentMarkdown(
+                documentId=document_id,
+                markdown_content=markdown_content,
+                source_url=f"https://mevzuat.adalet.gov.tr/ictihat/{document_id}",
+                mime_type=mime_type
+            )
+            await self._attach_kunye(document, resolve=resolve_kunye)
+            return document
+
         logger.info(f"BedestenApiClient: Fetching document for markdown conversion (ID: {document_id})")
-        
+
         try:
             # Prepare request
             doc_request = BedestenDocumentRequest(
                 data=BedestenDocumentRequestData(documentId=document_id)
             )
-            
+
             # Get document
-            await self._bucket.acquire(max_wait=self._DEFAULT_MAX_WAIT_S)
-            response = await self.http_client.post(
-                self.DOCUMENT_ENDPOINT,
-                json=doc_request.model_dump()
-            )
-            if response.status_code == 429:
-                self._handle_429(response, f"document {document_id}")
-            response.raise_for_status()
+            response = await self._post(self.DOCUMENT_ENDPOINT, doc_request.model_dump(), f"document {document_id}")
             response_json = response.json()
             doc_response = BedestenDocumentResponse(**response_json)
             
@@ -269,7 +288,10 @@ class BedestenApiClient:
             else:
                 logger.warning(f"Unsupported mime type: {mime_type}")
                 markdown_content = f"Unsupported content type: {mime_type}. Unable to convert to markdown."
-            
+
+            if markdown_content and not markdown_content.startswith(CONVERSION_ERROR_PREFIXES):
+                self._store_text(document_id, markdown_content, mime_type)
+
             document = BedestenDocumentMarkdown(
                 documentId=document_id,
                 markdown_content=markdown_content,
@@ -285,6 +307,20 @@ class BedestenApiClient:
         except Exception as e:
             logger.error(f"BedestenApiClient: Error processing document {document_id}: {e}")
             raise
+
+    # Cache problems must never cost the caller the decision text.
+    def _cached_text(self, document_id: str):
+        try:
+            return get_text_cache().get(document_id)
+        except Exception as e:
+            logger.warning(f"BedestenApiClient: Text cache read failed for {document_id}: {e}")
+            return None
+
+    def _store_text(self, document_id: str, markdown: str, mime_type: Optional[str]) -> None:
+        try:
+            get_text_cache().put(document_id, markdown, mime_type)
+        except Exception as e:
+            logger.warning(f"BedestenApiClient: Text cache write failed for {document_id}: {e}")
 
     async def _attach_kunye(self, document: BedestenDocumentMarkdown, resolve: bool) -> None:
         # A künye store problem must not cost the caller the decision text.

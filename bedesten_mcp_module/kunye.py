@@ -18,8 +18,8 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "veri")
-DEFAULT_DB_PATH = os.path.join(_DATA_DIR, "kunye.sqlite3")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "veri")
+DEFAULT_DB_PATH = os.path.join(DATA_DIR, "kunye.sqlite3")
 
 # For these types birimAdi has no court name ("3. Hukuk Dairesi", "4. Daire");
 # KYB decisions are rendered by Yargıtay criminal chambers. BAM and local court

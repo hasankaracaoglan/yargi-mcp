@@ -1,4 +1,3 @@
-from semantic_search.document_cache import doc_cache
 # mcp_server_main.py
 
 # --- MCP Spec Compliance: Reject null JSON-RPC IDs ---
@@ -259,7 +258,8 @@ def create_app():
 
 # --- Module Imports ---
 from yargitay_mcp_module.client import YargitayOfficialApiClient
-from bedesten_mcp_module.client import BedestenApiClient, BedestenRateLimited
+from bedesten_mcp_module.client import BedestenApiClient, BedestenRateLimited, CONVERSION_ERROR_PREFIXES
+from bedesten_mcp_module.onbellek import get_text_cache
 from bedesten_mcp_module.models import (
     BedestenSearchRequest, BedestenSearchData,
     BedestenDocumentMarkdown, BedestenCourtTypeEnum
@@ -1181,7 +1181,8 @@ Not supported: regex, fuzzy (~), proximity; * only at the end of a word."""),
 @app.tool(
     description=(
         "Use this when retrieving full text of a Bedesten search result by documentId. "
-        "Counts against the same Bedesten upstream rate limit as search; after 429, wait retry_after seconds before retrying. "
+        "Texts downloaded before (e.g. by download_bedesten_documents) come from the local cache instantly, without a request; "
+        "otherwise it counts against the Bedesten rate limit (after 429, wait retry_after seconds). "
         "Cite with the returned kunye/karar_tarihi (official metadata); never take the decision date from the text, "
         "which also contains lower-court and BAM dates."
     ),
@@ -1363,15 +1364,9 @@ YANLIŞ KULLANIM:
 
             for i, decision in enumerate(decisions_to_process):
                 try:
-                    cached_text = doc_cache.get(decision.documentId)
-                    if cached_text:
-                        markdown_text = cached_text
-                    else:
-                        await asyncio.sleep(0.1)
-                        doc = await bedesten_client_instance.get_document_as_markdown(decision.documentId)
-                        markdown_text = doc.markdown_content if doc else None
-                        if markdown_text:
-                            doc_cache.set(decision.documentId, markdown_text)
+                    # The client serves cached texts without a request.
+                    doc = await bedesten_client_instance.get_document_as_markdown(decision.documentId)
+                    markdown_text = doc.markdown_content if doc else None
 
                     if markdown_text:
                         metadata = {
@@ -1501,7 +1496,13 @@ YANLIŞ KULLANIM:
             }
 
 @app.tool(
-    description="Akıllı 100-Liste / 20-Tam Metin Karar Arama Aracı. Bedesten API'sinden 100 adete kadar karar künyesini çeker, ardından hedeflenen 20 kararın tam metinlerini diske önbellekleyerek ve hızlı asenkron yapı ile indirip yapay zeka analizine hazır halde sunar.",
+    description=(
+        "Rule 7 step 1 (100 künye): lists up to 100 decisions on a topic in relevance order in one call "
+        "(10 Bedesten pages, about 40-60 s), each as documentId + kunye. Bedesten gives no summaries, so choose "
+        "the best 20 or fewer by rank, the chamber that hears the subject, hierarchy (İBK/HGK/CGK first) and date, "
+        "then call download_bedesten_documents and read each text with get_bedesten_document_markdown. "
+        "Not for verifying a known decision: search its esas/karar numbers with search_bedesten_unified."
+    ),
     annotations={
         "readOnlyHint": True,
         "openWorldHint": True,
@@ -1509,117 +1510,129 @@ YANLIŞ KULLANIM:
     }
 )
 async def search_smart_decisions(
-    phrase: str = Field(..., description="Arama terimi veya olayın özet cümlesi."),
+    ctx: Context,
+    phrase: str = Field(..., description="Same syntax as search_bedesten_unified: kök*, AND/OR/NOT, parentheses, \"exact phrase\"."),
     court_types: List[BedestenCourtTypeEnum] = Field(
         default=["YARGITAYKARARI"],
-        description="Mahkeme türleri: YARGITAYKARARI, DANISTAYKARAR, YERELHUKUK, ISTINAFHUKUK, KYB (Varsayılan: YARGITAYKARARI)"
+        description="Court types: YARGITAYKARARI, DANISTAYKARAR, YERELHUKUK, ISTINAFHUKUK, KYB"
     ),
     birimAdi: BirimAdiEnum = Field(
         default="ALL",
-        description="Özel Daire Filtresi (Örn: H4 - 4. Hukuk Dairesi, H3 - 3. Hukuk Dairesi, H12 - 12. Hukuk Dairesi vb. Varsayılan: ALL)"
+        description="Chamber filter, e.g. H3 (3. Hukuk Dairesi), C15 (15. Ceza Dairesi), HGK, CGK, D6 (Danıştay 6. Daire)."
     ),
-    target_full_texts: int = Field(
-        default=20, ge=1, le=50,
-        description="Tam metni indirilip analiz edilecek karar sayısı (1-50, Varsayılan: 20)"
+    kararTarihiStart: str = Field("", description="Earliest decision date, YYYY-MM-DD. Without kararTarihiEnd it runs to today."),
+    kararTarihiEnd: str = Field("", description="Latest decision date, YYYY-MM-DD."),
+    max_results: int = Field(100, ge=10, le=100, description="How many künye to list (default 100).")
+) -> dict:
+    """Kural 7, step 1: up to 100 künye in Bedesten's relevance order."""
+    logger.info(f"search_smart_decisions: phrase={phrase!r}, court_types={court_types}, birimAdi={birimAdi}")
+    start, end = date_range(kararTarihiStart, kararTarihiEnd)
+    sent_phrase, query_rewrites = rewrite_phrase(phrase)
+    pages = (max_results + 9) // 10
+    decisions, seen, total_records, stopped = [], set(), 0, None
+
+    for page in range(1, pages + 1):
+        request = BedestenSearchRequest(data=BedestenSearchData(
+            phrase=sent_phrase, itemTypeList=court_types, birimAdi=birimAdi,
+            pageSize=10, pageNumber=page, kararTarihiStart=start, kararTarihiEnd=end,
+            sortFields=[],  # relevance order
+        ))
+        # The client already waits out 429s; whatever still fails is reported,
+        # not swallowed, so a short list is never mistaken for a complete one.
+        try:
+            response = await bedesten_client_instance.search_documents(request)
+        except Exception as e:
+            stopped = f"{page}. sayfada durdu: {e}"
+            logger.warning(f"search_smart_decisions: {stopped}")
+            break
+        if response.data is None:
+            stopped = f"{page}. sayfada Bedesten veri döndürmedi"
+            break
+        total_records = response.data.total or total_records
+        entries = response.data.emsalKararList or []
+        for d in entries:
+            if d.documentId not in seen:
+                seen.add(d.documentId)
+                decisions.append({
+                    "documentId": d.documentId,
+                    "kunye": format_kunye(d.itemType.name, d.birimAdi, d.esasNo, d.kararNo, d.kararTarihiStr),
+                })
+        await ctx.report_progress(page, pages)
+        if len(entries) < 10 or len(decisions) >= max_results:
+            break
+
+    result = {
+        "total_records": total_records,
+        "listed": min(len(decisions), max_results),
+        "decisions": decisions[:max_results],
+        "next_step": (
+            "Listeden davaya en uygun en fazla 20 kararı seçin: alaka sırası (üsttekiler terimlere en çok "
+            "odaklananlar), konuya bakan daire, hiyerarşi (İBK/HGK/CGK önce) ve güncellik. Seçtiklerinizi "
+            "download_bedesten_documents ile indirin, sonra her birini get_bedesten_document_markdown ile okuyun."
+        ),
+    }
+    if query_rewrites:
+        result["query_rewrites"] = query_rewrites
+    if stopped:
+        result["incomplete"] = stopped
+    return result
+
+
+@app.tool(
+    description=(
+        "Rule 7 step 2: downloads the full texts of the chosen decisions (max 50, usually 20) into the local cache, "
+        "waiting out Bedesten's rate limit (about 4 s per text not yet cached). Returns each kunye and status, not "
+        "the texts: then read each with get_bedesten_document_markdown, which serves cached texts instantly."
+    ),
+    annotations={
+        "readOnlyHint": True,
+        "openWorldHint": True,
+        "idempotentHint": True
+    }
+)
+async def download_bedesten_documents(
+    ctx: Context,
+    documentIds: List[str] = Field(
+        ..., min_length=1, max_length=50,
+        description="documentId values chosen from search_smart_decisions or search_bedesten_unified"
     )
-) -> Dict[str, Any]:
-    """
-    Bedesten API'sinden 100 karar künyesini çeker, belirtilen target_full_texts (varsayılan 20) kadar kararın tam metinlerini asenkron ve önbellekli şekilde indirip döndürür.
-    """
-    logger.info(f"search_smart_decisions tool called with phrase: {phrase}")
-    
-    try:
-        if not isinstance(court_types, list):
-            court_types = ["YARGITAYKARARI"]
-        if not isinstance(birimAdi, str):
-            birimAdi = "ALL"
-        if not isinstance(target_full_texts, int):
-            target_full_texts = 20
-            
-        court_types_str = [c.value if hasattr(c, "value") else str(c) for c in court_types]
-        birim_adi_str = birimAdi.value if hasattr(birimAdi, "value") else str(birimAdi)
-        
-        # Step 1: Search metadata up to 100 items via pages safely
-        all_decisions = []
-        for page_num in range(1, 11):
-            try:
-                if page_num > 1:
-                    await asyncio.sleep(0.3)
-                search_request = BedestenSearchRequest(
-                    data=BedestenSearchData(
-                        phrase=phrase,
-                        itemTypeList=court_types_str,
-                        birimAdi=birim_adi_str,
-                        pageNumber=page_num,
-                        pageSize=10
-                    )
-                )
-                resp = await bedesten_client_instance.search_documents(search_request)
-                emsal_list = resp.data.emsalKararList if hasattr(resp.data, 'emsalKararList') and resp.data.emsalKararList is not None else []
-                if not emsal_list:
-                    break
-                all_decisions.extend(emsal_list)
-                if len(all_decisions) >= 100 or len(emsal_list) < 10:
-                    break
-            except Exception as e:
-                logger.warning(f"Pagination stop at page {page_num}: {e}")
-                break
-        
-        if not all_decisions:
-            return {
-                "status": "no_results",
-                "message": "No decisions found matching the query",
-                "total_listed": 0,
-                "decisions": []
-            }
-            
-        decisions_to_fetch = all_decisions[:target_full_texts]
-        full_text_results = []
-        
-        for i, decision in enumerate(decisions_to_fetch):
-            try:
-                cached_text = doc_cache.get(decision.documentId)
-                if cached_text:
-                    markdown_text = cached_text
-                else:
-                    await asyncio.sleep(0.1)
-                    doc = await bedesten_client_instance.get_document_as_markdown(decision.documentId)
-                    markdown_text = doc.markdown_content if doc else None
-                    if markdown_text:
-                        doc_cache.set(decision.documentId, markdown_text)
-                
-                if markdown_text:
-                    full_text_results.append({
-                        "document_id": decision.documentId,
-                        "kunye": format_kunye(
-                            decision.itemType.name, decision.birimAdi, decision.esasNo,
-                            decision.kararNo, decision.kararTarihiStr,
-                        ),
-                        "birim_adi": decision.birimAdi,
-                        "esas_no": decision.esasNo,
-                        "karar_no": decision.kararNo,
-                        "karar_tarihi": decision.kararTarihiStr,
-                        "source_url": f"https://mevzuat.adalet.gov.tr/ictihat/{decision.documentId}",
-                        "markdown_content": markdown_text
-                    })
-            except Exception as e:
-                logger.warning(f"Error fetching decision {decision.documentId}: {e}")
-                
-        return {
-            "status": "success",
-            "phrase": phrase,
-            "total_listed": len(all_decisions),
-            "total_full_texts_fetched": len(full_text_results),
-            "decisions": full_text_results
-        }
-        
-    except Exception as e:
-        logger.exception(f"Error in search_smart_decisions: {e}")
-        return {
-            "status": "error",
-            "message": str(e),
-            "decisions": []
-        }# --- MCP Tools for Sayıştay (Turkish Court of Accounts) ---
+) -> dict:
+    """Kural 7, step 2: download the chosen texts into the cache."""
+    ids = list(dict.fromkeys(i.strip() for i in documentIds if i and i.strip()))
+    counts = {"downloaded": 0, "from_cache": 0, "failed": 0}
+    results = []
+    for n, doc_id in enumerate(ids, start=1):
+        try:
+            was_cached = doc_id in get_text_cache()
+        except Exception:
+            was_cached = False
+        try:
+            doc = await bedesten_client_instance.get_document_as_markdown(doc_id, resolve_kunye=True)
+            text = doc.markdown_content or ""
+            if not text or text.startswith(CONVERSION_ERROR_PREFIXES):
+                raise ValueError(text[:120] or "boş metin")
+            counts["from_cache" if was_cached else "downloaded"] += 1
+            results.append({
+                "documentId": doc_id,
+                "kunye": doc.kunye,
+                "chars": len(text),
+                "status": "önbellekte" if was_cached else "indirildi",
+            })
+        except Exception as e:
+            counts["failed"] += 1
+            logger.warning(f"download_bedesten_documents: {doc_id} failed: {e}")
+            results.append({"documentId": doc_id, "status": f"hata: {e}"})
+        await ctx.report_progress(n, len(ids))
+    return {
+        **counts,
+        "decisions": results,
+        "next_step": (
+            "Her kararı get_bedesten_document_markdown ile okuyun; metinler önbellekte olduğu için istek "
+            "harcamaz. Künyeyi kunye alanından aynen alın."
+        ),
+    }
+
+# --- MCP Tools for Sayıştay (Turkish Court of Accounts) ---
 
 # DEACTIVATED TOOL - Use search_sayistay_unified instead
 # @app.tool(
