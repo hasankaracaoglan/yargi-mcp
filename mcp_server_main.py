@@ -266,7 +266,7 @@ from bedesten_mcp_module.models import (
 )
 from bedesten_mcp_module.enums import BirimAdiEnum
 from bedesten_mcp_module.kunye import format_kunye
-from bedesten_mcp_module.sorgu import rewrite_phrase
+from bedesten_mcp_module.sorgu import date_range, rewrite_phrase
 
 # Semantic Search Module Imports (enabled if any embedding provider is configured)
 from semantic_search.embedder import is_semantic_search_available, is_local_embedding_configured
@@ -1078,8 +1078,8 @@ Not supported: regex, fuzzy (~), proximity; * only at the end of a word."""),
         • Yargıtay: H1-H23 (1-23. Hukuk Dairesi), C1-C23 (1-23. Ceza Dairesi), HGK (Hukuk Genel Kurulu), CGK (Ceza Genel Kurulu), BGK (Büyük Genel Kurulu), HBK (Hukuk Daireleri Başkanlar Kurulu), CBK (Ceza Daireleri Başkanlar Kurulu)
         • Danıştay: D1-D17 (1-17. Daire), DBGK (Büyük Gen.Kur.), IDDK (İdare Dava Daireleri Kurulu), VDDK (Vergi Dava Daireleri Kurulu), IBK (İçtihatları Birleştirme Kurulu), IIK (İdari İşler Kurulu), DBK (Başkanlar Kurulu), AYIM (Askeri Yüksek İdare Mahkemesi), AYIM1-3 (Askeri Yüksek İdare Mahkemesi 1-3. Daire)
         """),
-    kararTarihiStart: str = Field("", description="Start date (ISO 8601 format)"),
-    kararTarihiEnd: str = Field("", description="End date (ISO 8601 format)"),
+    kararTarihiStart: str = Field("", description="Earliest decision date, YYYY-MM-DD (e.g. 2020-01-01). Without kararTarihiEnd it runs to today."),
+    kararTarihiEnd: str = Field("", description="Latest decision date, YYYY-MM-DD. Without kararTarihiStart it runs from the earliest decisions."),
     sort_by: Literal["relevance", "date"] = Field(
         "relevance",
         description="relevance: decisions centred on the terms first (may be old; add kararTarihiStart for current law). date: newest first."
@@ -1088,19 +1088,8 @@ Not supported: regex, fuzzy (~), proximity; * only at the end of a word."""),
     """Search Turkish legal databases via unified Bedesten API."""
 
     pageSize = 10  # Default value
-    
-    # Convert date formats if provided
-    # Accept formats: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS.000Z
-    if kararTarihiStart and not kararTarihiStart.endswith('Z'):
-        # Convert simple date format to ISO 8601 with timezone
-        if 'T' not in kararTarihiStart:
-            kararTarihiStart = f"{kararTarihiStart}T00:00:00.000Z"
-    
-    if kararTarihiEnd and not kararTarihiEnd.endswith('Z'):
-        # Convert simple date format to ISO 8601 with timezone
-        if 'T' not in kararTarihiEnd:
-            kararTarihiEnd = f"{kararTarihiEnd}T23:59:59.999Z"
-    
+
+    kararTarihiStart, kararTarihiEnd = date_range(kararTarihiStart, kararTarihiEnd)
     sent_phrase, query_rewrites = rewrite_phrase(phrase)
     search_data = BedestenSearchData(
         pageSize=pageSize,

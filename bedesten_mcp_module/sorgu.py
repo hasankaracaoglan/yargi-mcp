@@ -8,7 +8,8 @@ sends slashed terms such as case numbers as phrases.
 """
 
 import re
-from typing import List, Tuple
+from datetime import date, datetime, timedelta, timezone
+from typing import List, Optional, Tuple
 
 _VOWELS = "aıoueiöüâîû"
 _BACK = "aıouâû"
@@ -130,3 +131,45 @@ def rewrite_phrase(phrase: str) -> Tuple[str, List[str]]:
         pos = m.end()
     out.append(unquoted(phrase[pos:]))
     return "".join(out), notes
+
+
+_TURKEY = timezone(timedelta(hours=3))
+_EARLIEST = date(1900, 1, 1)
+_DMY = re.compile(r"(\d{1,2})[./-](\d{1,2})[./-](\d{4})$")
+
+
+def date_range(start: str, end: str) -> Tuple[Optional[str], Optional[str]]:
+    """Bedesten bounds for a decision-date filter given as YYYY-MM-DD or DD.MM.YYYY.
+
+    Bedesten ignores a one-sided range (3. HD, measured 2026-10-31: start only
+    48 hits = no filter; start and end 16), so a missing bound is filled with
+    the earliest date or today. A day D is sent as [D-1 21:00Z, D 20:59:59.999Z]:
+    the filter matched decisions on their UTC-midnight date in tests, while
+    kararTarihi shows Turkish midnight in UTC (05.05.2026 -> 2026-05-04T21:00Z);
+    this window holds both forms of D and neither form of its neighbours.
+    Values that already contain 'T' are passed through unchanged.
+    """
+    if not start and not end:
+        return None, None
+    lo = start if "T" in start else _day_start(_parse_day(start) if start else _EARLIEST)
+    hi = end if "T" in end else _day_end(_parse_day(end) if end else datetime.now(_TURKEY).date())
+    return lo, hi
+
+
+def _parse_day(value: str) -> date:
+    value = value.strip()
+    m = _DMY.match(value)
+    if m:
+        return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"Tarih YYYY-MM-DD biçiminde olmalı (örn. 2020-01-01): {value!r}") from None
+
+
+def _day_start(day: date) -> str:
+    return f"{(day - timedelta(days=1)).isoformat()}T21:00:00.000Z"
+
+
+def _day_end(day: date) -> str:
+    return f"{day.isoformat()}T20:59:59.999Z"
