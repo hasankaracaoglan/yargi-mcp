@@ -265,6 +265,7 @@ from bedesten_mcp_module.models import (
     BedestenDocumentMarkdown, BedestenCourtTypeEnum
 )
 from bedesten_mcp_module.enums import BirimAdiEnum
+from bedesten_mcp_module.kunye import format_kunye
 
 # Semantic Search Module Imports (enabled if any embedding provider is configured)
 from semantic_search.embedder import is_semantic_search_available, is_local_embedding_configured
@@ -1046,7 +1047,8 @@ async def get_rekabet_kurumu_document(
     description=(
         "Use this for Turkish court decision records from Yargıtay, Danıştay, Local Courts, Appeals Courts, and KYB via Bedesten. "
         "Prefer narrow court_types over all courts. pageSize is intentionally fixed to 10 results per page. "
-        "Bedesten is upstream rate-limited; avoid parallel repeated calls and wait retry_after seconds after 429 responses."
+        "Bedesten is upstream rate-limited; avoid parallel repeated calls and wait retry_after seconds after 429 responses. "
+        "Each decision carries kunye, the official citation to use as is."
     ),
     annotations={
         "readOnlyHint": True,
@@ -1064,10 +1066,11 @@ async def search_bedesten_unified(
 • Boolean AND: "mülkiyet AND hak" (both terms required)
 • Boolean OR: "mülkiyet OR tapu" (either term acceptable)
 • Boolean NOT: "mülkiyet NOT satış" (contains mülkiyet but not satış)
+• Esas/karar no: "2022/8423 AND 2023/291" (slashed terms are sent as phrases "2022 8423"; a raw '/' returns no data)
 NOTE: Wildcards (*,?), regex patterns (/regex/), fuzzy search (~), and proximity search are NOT supported.
 For best results, use exact phrases with quotes for legal terms."""),
     court_types: List[BedestenCourtTypeEnum] = Field(
-        default=["YARGITAYKARARI", "DANISTAYKARAR"], 
+        default=["YARGITAYKARARI", "DANISTAYKARAR"],
         description="Court types: YARGITAYKARARI, DANISTAYKARAR, YERELHUKUK, ISTINAFHUKUK, KYB"
     ),
     # pageSize: int = Field(10, ge=1, le=10, description="Results per page (1-10)"),
@@ -1127,13 +1130,23 @@ For best results, use exact phrases with quotes for legal terms."""),
         emsal_karar_list = response.data.emsalKararList if hasattr(response.data, 'emsalKararList') and response.data.emsalKararList is not None else []
         total_records = response.data.total if hasattr(response.data, 'total') and response.data.total is not None else 0
 
-        return {
-            "decisions": [d.model_dump() for d in emsal_karar_list],
+        result = {
+            "decisions": [
+                {
+                    "kunye": format_kunye(d.itemType.name, d.birimAdi, d.esasNo, d.kararNo, d.kararTarihiStr),
+                    **d.model_dump(),
+                }
+                for d in emsal_karar_list
+            ],
             "total_records": total_records,
             "requested_page": pageNumber,
             "page_size": pageSize,
             "searched_courts": court_types
         }
+        # search_documents rewrites slashed terms in place; show what was sent
+        if search_request.data.phrase != phrase:
+            result["applied_phrase"] = search_request.data.phrase
+        return result
     except BedestenRateLimited as e:
         retry_after = f"{e.retry_after:.1f}"
         logger.warning(f"Bedesten local rate-limit bucket full for search; retry-after={retry_after}s")
@@ -1185,7 +1198,9 @@ For best results, use exact phrases with quotes for legal terms."""),
 @app.tool(
     description=(
         "Use this when retrieving full text of a Bedesten search result by documentId. "
-        "Counts against the same Bedesten upstream rate limit as search; after 429, wait retry_after seconds before retrying."
+        "Counts against the same Bedesten upstream rate limit as search; after 429, wait retry_after seconds before retrying. "
+        "Cite with the returned kunye/karar_tarihi (official metadata); never take the decision date from the text, "
+        "which also contains lower-court and BAM dates."
     ),
     annotations={
         "readOnlyHint": True,
@@ -1202,7 +1217,7 @@ async def get_bedesten_document_markdown(
         raise ValueError("Document ID must be a non-empty string.")
     
     try:
-        return await bedesten_client_instance.get_document_as_markdown(documentId)
+        return await bedesten_client_instance.get_document_as_markdown(documentId, resolve_kunye=True)
     except BedestenRateLimited as e:
         retry_after = f"{e.retry_after:.1f}"
         logger.warning(f"Bedesten local rate-limit bucket full for document {documentId}; retry-after={retry_after}s")
@@ -1471,6 +1486,11 @@ YANLIŞ KULLANIM:
 
                 formatted_results.append({
                     "document_id": doc.id,
+                    "kunye": format_kunye(
+                        doc.metadata.get("court_type"), doc.metadata.get("birim_adi"),
+                        doc.metadata.get("esas_no"), doc.metadata.get("karar_no"),
+                        doc.metadata.get("karar_tarihi"),
+                    ),
                     "title": title,
                     "similarity_score": float(score),
                     "preview": doc.text[:500] + "..." if len(doc.text) > 500 else doc.text,
@@ -1594,6 +1614,10 @@ async def search_smart_decisions(
                 if markdown_text:
                     full_text_results.append({
                         "document_id": decision.documentId,
+                        "kunye": format_kunye(
+                            decision.itemType.name, decision.birimAdi, decision.esasNo,
+                            decision.kararNo, decision.kararTarihiStr,
+                        ),
                         "birim_adi": decision.birimAdi,
                         "esas_no": decision.esasNo,
                         "karar_no": decision.kararNo,

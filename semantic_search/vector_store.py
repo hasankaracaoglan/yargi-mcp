@@ -119,8 +119,10 @@ class VectorStore:
         if len(query_embedding.shape) == 1:
             query_embedding = query_embedding.reshape(1, -1)
         
-        # Compute cosine similarities (assuming normalized embeddings)
-        similarities = np.dot(self.embeddings, query_embedding.T).squeeze()
+        # Compute cosine similarities (assuming normalized embeddings).
+        # atleast_1d: with a single stored chunk squeeze() yields a 0-d array,
+        # which np.where below rejects.
+        similarities = np.atleast_1d(np.dot(self.embeddings, query_embedding.T).squeeze())
         
         # Apply threshold if specified
         if threshold is not None:

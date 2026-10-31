@@ -52,7 +52,9 @@ class BedestenDecisionEntry(BaseModel):
     kararNoYil: Optional[int] = None
     kararNoSira: Optional[int] = None
     kararTuru: Optional[str] = None
-    kararTarihi: str
+    # UTC timestamp of local midnight, so its date part is one day early
+    # ("2026-05-04T21:00:00Z" for 05.05.2026). Kept off tool output; cite kararTarihiStr.
+    kararTarihi: str = Field(..., exclude=True)
     kararTarihiStr: str
     kesinlesmeDurumu: Optional[str] = None
     kararNo: Optional[str] = None
@@ -86,6 +88,12 @@ class BedestenDocumentResponse(BaseModel):
 
 class BedestenDocumentMarkdown(BaseModel):
     documentId: str = Field(..., description="The document ID (Belge Kimliği) from Bedesten")
-    markdown_content: Optional[str] = Field(None, description="The decision content (Karar İçeriği) converted to Markdown")
+    kunye: Optional[str] = Field(None, description="Official citation from Bedesten metadata, ready for the petition")
+    mahkeme: Optional[str] = Field(None, description="Court and chamber (Mahkeme/Daire)")
+    esas_no: Optional[str] = Field(None, description="Official Esas No")
+    karar_no: Optional[str] = Field(None, description="Official Karar No")
+    karar_tarihi: Optional[str] = Field(None, description="Official decision date (DD.MM.YYYY); the text also contains lower-court/BAM dates")
+    kunye_notu: Optional[str] = Field(None, description="Set when the official citation could not be found")
     source_url: str = Field(..., description="The source URL (Kaynak URL) of the document")
     mime_type: Optional[str] = Field(None, description="Original content type (İçerik Türü) (text/html or application/pdf)")
+    markdown_content: Optional[str] = Field(None, description="The decision content (Karar İçeriği) converted to Markdown")

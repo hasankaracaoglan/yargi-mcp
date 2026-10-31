@@ -12,13 +12,22 @@ import httpx
 from markitdown import MarkItDown
 
 from .models import (
-    BedestenSearchRequest, BedestenSearchResponse,
+    BedestenSearchRequest, BedestenSearchResponse, BedestenSearchData,
     BedestenDocumentRequest, BedestenDocumentResponse,
     BedestenDocumentMarkdown, BedestenDocumentRequestData
 )
 from .enums import get_full_birim_adi
+from .kunye import court_name, format_kunye, get_store, normalize_phrase, numbers_from_header
 
 logger = logging.getLogger(__name__)
+
+ALL_COURT_TYPES = ["YARGITAYKARARI", "DANISTAYKARAR", "YERELHUKUK", "ISTINAFHUKUK", "KYB"]
+
+KUNYE_NOT_FOUND_NOTE = (
+    "Resmi künye bulunamadı. Metindeki tarihler alt mahkeme/BAM kararlarına ait "
+    "olabilir; karar tarihini metinden çıkarmayın. Kararı search_bedesten_unified ile "
+    "esas ve karar numarasıyla (örn. 2022/8423 AND 2023/291) arayarak künyesini doğrulayın."
+)
 
 
 class BedestenRateLimited(Exception):
@@ -155,7 +164,12 @@ class BedestenApiClient:
         search_request.data.birimAdi = mapped_birim_adi
         if original_birim_adi != "ALL":
             logger.info(f"BedestenApiClient: Mapped birimAdi '{original_birim_adi}' to '{mapped_birim_adi}'")
-        
+
+        normalized_phrase = normalize_phrase(search_request.data.phrase)
+        if normalized_phrase != search_request.data.phrase:
+            logger.info(f"BedestenApiClient: Rewrote slashed terms in phrase to {normalized_phrase!r}")
+            search_request.data.phrase = normalized_phrase
+
         try:
             # Create request dict and remove birimAdi if empty
             request_dict = search_request.model_dump()
@@ -173,7 +187,13 @@ class BedestenApiClient:
             response_json = response.json()
 
             # Parse and return the response
-            return BedestenSearchResponse(**response_json)
+            search_response = BedestenSearchResponse(**response_json)
+            if search_response.data and search_response.data.emsalKararList:
+                try:
+                    get_store().save_entries(search_response.data.emsalKararList)
+                except Exception as e:
+                    logger.warning(f"BedestenApiClient: Could not record künye: {e}")
+            return search_response
 
         except httpx.RequestError as e:
             logger.error(f"BedestenApiClient: HTTP request error during search: {e}")
@@ -182,10 +202,12 @@ class BedestenApiClient:
             logger.error(f"BedestenApiClient: Error processing search response: {e}")
             raise
     
-    async def get_document_as_markdown(self, document_id: str) -> BedestenDocumentMarkdown:
+    async def get_document_as_markdown(self, document_id: str, resolve_kunye: bool = False) -> BedestenDocumentMarkdown:
         """
         Get document content and convert to markdown.
         Handles both HTML (text/html) and PDF (application/pdf) content types.
+        The official künye is attached from recorded search results; with
+        ``resolve_kunye`` an unrecorded document costs one extra search request.
         """
         logger.info(f"BedestenApiClient: Fetching document for markdown conversion (ID: {document_id})")
         
@@ -245,19 +267,59 @@ class BedestenApiClient:
                 logger.warning(f"Unsupported mime type: {mime_type}")
                 markdown_content = f"Unsupported content type: {mime_type}. Unable to convert to markdown."
             
-            return BedestenDocumentMarkdown(
+            document = BedestenDocumentMarkdown(
                 documentId=document_id,
                 markdown_content=markdown_content,
                 source_url=f"https://mevzuat.adalet.gov.tr/ictihat/{document_id}",
                 mime_type=mime_type
             )
-            
+            await self._attach_kunye(document, resolve=resolve_kunye)
+            return document
+
         except httpx.RequestError as e:
             logger.error(f"BedestenApiClient: HTTP error fetching document {document_id}: {e}")
             raise
         except Exception as e:
             logger.error(f"BedestenApiClient: Error processing document {document_id}: {e}")
             raise
+
+    async def _attach_kunye(self, document: BedestenDocumentMarkdown, resolve: bool) -> None:
+        # A künye store problem must not cost the caller the decision text.
+        try:
+            kunye = get_store().get(document.documentId)
+            if kunye is None and resolve and document.markdown_content:
+                numbers = numbers_from_header(document.markdown_content)
+                if numbers:
+                    kunye = await self._lookup_kunye(document.documentId, *numbers)
+        except Exception as e:
+            logger.warning(f"BedestenApiClient: Künye unavailable for {document.documentId}: {e}")
+            kunye = None
+        if kunye is None:
+            document.kunye_notu = KUNYE_NOT_FOUND_NOTE
+            return
+        document.mahkeme = court_name(kunye["item_type"], kunye["birim_adi"])
+        document.esas_no = kunye["esas_no"]
+        document.karar_no = kunye["karar_no"]
+        document.karar_tarihi = kunye["karar_tarihi"]
+        document.kunye = format_kunye(
+            kunye["item_type"], kunye["birim_adi"],
+            kunye["esas_no"], kunye["karar_no"], kunye["karar_tarihi"],
+        )
+
+    async def _lookup_kunye(self, document_id: str, esas_no: str, karar_no: str):
+        """Search by the header's numbers; search_documents records every hit,
+        so only a hit with this exact documentId yields a künye and a misread
+        header cannot attach another decision's citation."""
+        phrase = f"{esas_no} AND {karar_no}"
+        request = BedestenSearchRequest(data=BedestenSearchData(
+            phrase=phrase, itemTypeList=ALL_COURT_TYPES, pageSize=10, pageNumber=1
+        ))
+        try:
+            await self.search_documents(request)
+        except Exception as e:
+            logger.warning(f"BedestenApiClient: Künye lookup failed for {document_id}: {e}")
+            return None
+        return get_store().get(document_id)
     
     def _convert_html_to_markdown(self, html_content: str) -> Optional[str]:
         """Convert HTML to Markdown using MarkItDown"""

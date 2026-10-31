@@ -68,9 +68,14 @@ class DocumentProcessor:
         if metadata is None:
             metadata = {}
         
-        # Add extracted metadata
+        # Extracted values only fill missing fields. The first date in the text
+        # is usually a lower-court or BAM date, so it must not replace the
+        # official Bedesten date (3. HD 2022/8423 E. showed 01.11.2022 instead
+        # of 23.02.2023).
         extracted_metadata = self._extract_metadata(cleaned_text)
-        metadata.update(extracted_metadata)
+        for key, value in extracted_metadata.items():
+            if not metadata.get(key):
+                metadata[key] = value
         
         # Create chunks
         chunks = self._create_chunks(cleaned_text)
