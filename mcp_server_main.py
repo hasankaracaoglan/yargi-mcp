@@ -267,6 +267,7 @@ from bedesten_mcp_module.models import (
 from bedesten_mcp_module.enums import BirimAdiEnum
 from bedesten_mcp_module.kunye import format_kunye
 from bedesten_mcp_module.sorgu import date_range, rewrite_phrase
+from bedesten_mcp_module.alinti import check_quote
 
 # Semantic Search Module Imports (enabled if any embedding provider is configured)
 from semantic_search.embedder import is_semantic_search_available, is_local_embedding_configured
@@ -1630,6 +1631,50 @@ async def download_bedesten_documents(
             "Her kararı get_bedesten_document_markdown ile okuyun; metinler önbellekte olduğu için istek "
             "harcamaz. Künyeyi kunye alanından aynen alın."
         ),
+    }
+
+
+@app.tool(
+    description=(
+        "Checks that a quotation from a Bedesten decision (Yargıtay, Danıştay, BAM, local court, KYB) appears "
+        "word for word in the decision text (petition rule 2: quotes must be verbatim). Pass the quote as it "
+        "stands in the petition: the >>> marker, asterisks (italics, **emphasis**) and the outer quotation marks "
+        "are ignored, and '...' or '…' marks an omitted part. Result durum: TAM_ESLESME (verbatim), BICIM_FARKI "
+        "(same words, different quotation mark/apostrophe/dash glyphs; kaynaktaki_parcalar gives the source "
+        "form), ESLESMEDI (a part is not in the decision; en_yakin_kaynak_metni and farklar show the source "
+        "wording, benzerlik 0-1). Reads the cached text; downloads it if not cached. Not for AYM decisions."
+    ),
+    annotations={
+        "readOnlyHint": True,
+        "idempotentHint": True
+    }
+)
+async def verify_bedesten_quote(
+    documentId: str = Field(..., description="documentId of the decision: the number at the end of its mevzuat.adalet.gov.tr/ictihat/ link"),
+    quote: str = Field(..., description="The quotation exactly as written in the petition")
+) -> dict:
+    """Compares a petition quotation with the decision's full text."""
+    doc_id = (documentId or "").strip()
+    if not doc_id:
+        raise ValueError("Document ID must be a non-empty string.")
+    try:
+        doc = await bedesten_client_instance.get_document_as_markdown(doc_id, resolve_kunye=True)
+    except BedestenRateLimited as e:
+        return {"durum": "HATA", "aciklama": f"Bedesten istek sınırı; {e.retry_after:.0f} sn sonra tekrar deneyin."}
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            retry_after = e.response.headers.get("Retry-After", "")
+            return {"durum": "HATA", "aciklama": f"Bedesten istek sınırı (HTTP 429); {retry_after or 'birkaç'} sn sonra tekrar deneyin."}
+        logger.exception("Error in tool 'verify_bedesten_quote'")
+        raise
+    text = doc.markdown_content or ""
+    if text.startswith(CONVERSION_ERROR_PREFIXES):
+        return {"durum": "HATA", "aciklama": f"Karar metni alınamadı: {text[:160]}"}
+    return {
+        "documentId": doc_id,
+        "kunye": doc.kunye,
+        "source_url": doc.source_url,
+        **check_quote(text, quote),
     }
 
 # --- MCP Tools for Sayıştay (Turkish Court of Accounts) ---
