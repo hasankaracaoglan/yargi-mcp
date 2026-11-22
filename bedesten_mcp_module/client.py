@@ -2,7 +2,9 @@
 
 import asyncio
 import base64
+import fcntl
 import io
+import json
 import logging
 import os
 import time
@@ -32,6 +34,12 @@ KUNYE_NOT_FOUND_NOTE = (
     "Resmi künye bulunamadı. Metindeki tarihler alt mahkeme/BAM kararlarına ait "
     "olabilir; karar tarihini metinden çıkarmayın. Kararı search_bedesten_unified ile "
     "esas ve karar numarasıyla (örn. 2022/8423 AND 2023/291) arayarak künyesini doğrulayın."
+)
+
+KUNYE_NO_DATE_NOTE = (
+    "Bedesten kaydında bu kararın tarihi yok; künye tarihsiz verildi. Karar tarihini "
+    "metinden çıkarmayın (metinde alt mahkeme/BAM tarihleri de geçer). Tarih gerekiyorsa "
+    "kararı mevzuat.adalet.gov.tr'de açıp elle teyit edin ya da tarihli başka bir karar seçin."
 )
 
 
@@ -100,6 +108,123 @@ class _TokenBucket:
         self._tokens = 0.0
         self._last = time.monotonic()
 
+    def penalize(self, seconds: float) -> None:
+        self.penalize_until(time.monotonic() + seconds)
+
+
+class _SharedGate:
+    """Request spacing shared by every yargi-mcp process on this machine.
+
+    Bedesten's limit is per source IP, but each MCP client (every Claude Code
+    session, Antigravity) starts its own server process, and an in-process
+    bucket cannot see the other processes' requests. The schedule therefore
+    lives in a small JSON file under an exclusive ``flock``:
+
+    * each request reserves the next free slot, ``interval_s`` after the
+      previous one (first come, first served, across processes);
+    * a 429 sets ``paused_until`` and every process waits it out.
+
+    The locked section only reads and writes a few bytes, so the blocking
+    ``flock`` never holds the event loop noticeably. If the file cannot be
+    used, the gate falls back to an in-process bucket and logs it once.
+    """
+
+    # A slot or pause further ahead than this is treated as stale (e.g. the
+    # clock moved back) and reset, so a bad file cannot block searches.
+    _MAX_AHEAD_S = 300.0
+
+    def __init__(self, path: str, interval_s: float) -> None:
+        self.path = path
+        self.interval_s = float(interval_s)
+        self._fallback = _TokenBucket(capacity=1, refill_per_s=1.0 / self.interval_s)
+        self._failed = False
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    def _update(self, fn):
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        with os.fdopen(fd, "r+", encoding="utf-8") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                raw = f.read()
+                try:
+                    state = json.loads(raw) if raw.strip() else {}
+                except ValueError:
+                    state = {}
+                result, changed = fn(state)
+                if changed:
+                    f.seek(0)
+                    f.truncate()
+                    f.write(json.dumps(state))
+                    f.flush()
+                return result
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+
+    def _times(self, state: dict, now: float):
+        next_slot = float(state.get("next_slot", 0.0) or 0.0)
+        paused_until = float(state.get("paused_until", 0.0) or 0.0)
+        if next_slot - now > self._MAX_AHEAD_S:
+            next_slot = 0.0
+        if paused_until - now > self._MAX_AHEAD_S:
+            paused_until = 0.0
+        return next_slot, paused_until
+
+    def _use_fallback(self, e: Exception) -> None:
+        if not self._failed:
+            logger.warning(f"BedestenApiClient: shared gate {self.path} unusable ({e}); using in-process bucket")
+        self._failed = True
+
+    async def acquire(self, max_wait: Optional[float] = None) -> None:
+        if self._failed:
+            return await self._fallback.acquire(max_wait=max_wait)
+        while True:
+            now = time.time()
+
+            def reserve(state):
+                next_slot, paused_until = self._times(state, now)
+                slot = max(now, next_slot, paused_until)
+                wait = slot - now
+                if max_wait is not None and wait > max_wait:
+                    return (wait, False), False
+                state["next_slot"] = slot + self.interval_s
+                state["paused_until"] = paused_until
+                return (wait, True), True
+
+            try:
+                wait, reserved = self._update(reserve)
+            except OSError as e:
+                self._use_fallback(e)
+                return await self._fallback.acquire(max_wait=max_wait)
+            if not reserved:
+                raise BedestenRateLimited(retry_after=wait)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            # A 429 elsewhere while we slept moves everyone behind its pause.
+            try:
+                _, paused_until = self._update(lambda s: (self._times(s, time.time()), False))
+            except OSError as e:
+                self._use_fallback(e)
+                return
+            if paused_until <= time.time():
+                return
+
+    def penalize(self, seconds: float) -> None:
+        if self._failed:
+            return self._fallback.penalize(seconds)
+        until = time.time() + seconds
+
+        def pause(state):
+            _, paused_until = self._times(state, time.time())
+            state["paused_until"] = max(paused_until, until)
+            return None, True
+
+        try:
+            self._update(pause)
+        except OSError as e:
+            self._use_fallback(e)
+            self._fallback.penalize(seconds)
+
+
 class BedestenApiClient:
     """
     API Client for Bedesten (bedesten.adalet.gov.tr) - Alternative legal decision search system.
@@ -118,6 +243,10 @@ class BedestenApiClient:
     #     local bucket before returning a structured 429 to the caller)
     #   BEDESTEN_429_RETRIES (default 2; retries after a 429, each waiting
     #     the server's Retry-After)
+    #   BEDESTEN_SHARED_GATE (default 1; 0 = per-process bucket only). The
+    #     shared gate spaces requests across all yargi-mcp processes (Claude
+    #     sessions, Antigravity) through BEDESTEN_GATE_FILE, default
+    #     veri/bedesten_kapi.json. It always has capacity 1.
     _DEFAULT_CAPACITY = int(os.getenv("BEDESTEN_RATE_CAPACITY", "1"))
     _DEFAULT_REFILL_S = float(os.getenv("BEDESTEN_RATE_REFILL_S", "3.5"))
     _DEFAULT_MAX_WAIT_S = float(os.getenv("BEDESTEN_RATE_MAX_WAIT_S", "90.0"))
@@ -140,10 +269,22 @@ class BedestenApiClient:
             },
             timeout=request_timeout
         )
-        self._bucket = _TokenBucket(
-            capacity=self._DEFAULT_CAPACITY,
-            refill_per_s=1.0 / self._DEFAULT_REFILL_S,
-        )
+        if os.getenv("BEDESTEN_SHARED_GATE", "1") != "0":
+            gate_file = os.getenv("BEDESTEN_GATE_FILE") or os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "veri", "bedesten_kapi.json"
+            )
+            try:
+                self._bucket = _SharedGate(gate_file, self._DEFAULT_REFILL_S)
+            except OSError as e:
+                logger.warning(f"BedestenApiClient: shared gate unavailable ({e}); using in-process bucket")
+                self._bucket = None
+        else:
+            self._bucket = None
+        if self._bucket is None:
+            self._bucket = _TokenBucket(
+                capacity=self._DEFAULT_CAPACITY,
+                refill_per_s=1.0 / self._DEFAULT_REFILL_S,
+            )
 
     def _handle_429(self, response: httpx.Response, op: str) -> None:
         """Apply back-pressure to the shared bucket based on Retry-After."""
@@ -154,7 +295,7 @@ class BedestenApiClient:
             retry_after = 30.0
         # Cap penalty so a hostile/buggy server can't freeze us indefinitely.
         retry_after = max(1.0, min(retry_after, 60.0))
-        self._bucket.penalize_until(time.monotonic() + retry_after + 0.5)
+        self._bucket.penalize(retry_after + 0.5)
         logger.warning(
             f"BedestenApiClient: 429 on {op}; bucket paused {retry_after + 0.5:.1f}s"
         )
@@ -344,6 +485,8 @@ class BedestenApiClient:
             kunye["item_type"], kunye["birim_adi"],
             kunye["esas_no"], kunye["karar_no"], kunye["karar_tarihi"],
         )
+        if not kunye["karar_tarihi"]:
+            document.kunye_notu = KUNYE_NO_DATE_NOTE
 
     async def _lookup_kunye(self, document_id: str, esas_no: str, karar_no: str):
         """Search by the header's numbers; search_documents records every hit,

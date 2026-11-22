@@ -474,7 +474,7 @@ doc8 = await get_kvkk_document_markdown(decision_url="https://www.kvkk.gov.tr/Ic
 
 | API | Rate Limit | Notes |
 |-----|------------|-------|
-| Bedesten Unified | ~10 req / 30s window per source IP (measured 2026-05-08); 11th req → HTTP 429 with `Retry-After: 30`. Client uses an internal token bucket (default 1 token, refill 1/3.5s) plus 429 back-pressure (whole bucket pauses for the Retry-After window). Override via `BEDESTEN_RATE_CAPACITY` / `BEDESTEN_RATE_REFILL_S`. |
+| Bedesten Unified | ~10 req / 30s window per source IP (measured 2026-05-08); 11th req → HTTP 429 with `Retry-After: 30`. Requests are spaced 3.5 s apart by a gate shared by every yargi-mcp process on the machine (Claude sessions, Antigravity): the schedule lives in `veri/bedesten_kapi.json` under `flock`, and a 429 pauses all processes for the Retry-After window. `BEDESTEN_SHARED_GATE=0` falls back to the per-process token bucket (also used automatically if the file is unusable). Override spacing via `BEDESTEN_RATE_REFILL_S`, file via `BEDESTEN_GATE_FILE`. |
 | Yargıtay Primary | Unknown | Official government API |
 | Danıştay | Unknown | Official government API |
 | Anayasa Mahkemesi | Unknown | Constitutional Court API |

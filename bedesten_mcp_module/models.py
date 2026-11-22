@@ -54,8 +54,10 @@ class BedestenDecisionEntry(BaseModel):
     kararTuru: Optional[str] = None
     # UTC timestamp of local midnight, so its date part is one day early
     # ("2026-05-04T21:00:00Z" for 05.05.2026). Kept off tool output; cite kararTarihiStr.
-    kararTarihi: str = Field(..., exclude=True)
-    kararTarihiStr: str
+    # Bedesten returns some records without a date (both fields null); a
+    # required field made the whole page fail validation and cut the list short.
+    kararTarihi: Optional[str] = Field(None, exclude=True)
+    kararTarihiStr: Optional[str] = None
     kesinlesmeDurumu: Optional[str] = None
     kararNo: Optional[str] = None
     esasNo: Optional[str] = None
