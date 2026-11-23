@@ -2,7 +2,10 @@
 
 import asyncio
 import base64
-import fcntl
+try:
+    import fcntl  # POSIX only; Windows has no flock -> per-process bucket
+except ImportError:
+    fcntl = None
 import io
 import json
 import logging
@@ -269,7 +272,7 @@ class BedestenApiClient:
             },
             timeout=request_timeout
         )
-        if os.getenv("BEDESTEN_SHARED_GATE", "1") != "0":
+        if fcntl is not None and os.getenv("BEDESTEN_SHARED_GATE", "1") != "0":
             gate_file = os.getenv("BEDESTEN_GATE_FILE") or os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "veri", "bedesten_kapi.json"
             )
