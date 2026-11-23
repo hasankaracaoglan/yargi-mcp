@@ -16,7 +16,35 @@
 > - Bedesten istekleri aynı makinedeki bütün sunucu süreçleri arasında ortak bir sırayla gönderilir; 429'da
 >   `Retry-After` beklenir.
 >
-> **Kurulum (bu fork):** [uv](https://docs.astral.sh/uv/) kuruluysa MCP istemcisi sunucuyu doğrudan GitHub'dan çalıştırabilir
+> ### Yapay zekâ asistanıyla kurulum
+>
+> Terminal kullanabilen bir yapay zekâ asistanına (Claude Code, Antigravity vb.) bu sayfanın bağlantısını
+> verip “bunu kur” demeniz yeterlidir. Asistan aşağıdaki adımları izler; komut çalıştırmadan önce izin ister.
+>
+> **Asistan için adımlar:**
+>
+> 1. `uv` kurulu değilse kur. macOS/Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+>    Windows: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`.
+>    Sonra `uvx`'in tam yolunu bul (`command -v uvx`; çoğunlukla `~/.local/bin/uvx`). Masaüstü uygulamaları
+>    `~/.local/bin`'i PATH'te görmediği için ayarlarda daima bu tam yolu kullan.
+> 2. Sunucuyu kullanıcının kullandığı asistana ekle. Çalıştırılacak komut:
+>    `<uvx tam yolu> --from git+https://github.com/hasankaracaoglan/yargi-mcp yargi-mcp`
+>    - **Claude Code:** `claude mcp add yargi-mcp -s user -- <uvx tam yolu> --from git+https://github.com/hasankaracaoglan/yargi-mcp yargi-mcp`
+>    - **Claude Desktop:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+>      (Windows: `%APPDATA%\Claude\claude_desktop_config.json`). Dosya yoksa oluştur.
+>    - **Antigravity:** `~/.gemini/config/mcp_config.json` ya da `~/.gemini/antigravity/mcp_config.json`
+>      (hangisi varsa).
+>    - JSON dosyalarında önce dosyanın yedeğini al, sonra `mcpServers` nesnesine şu girdiyi ekle; var olan
+>      sunuculara dokunma ve dosyanın geçerli JSON kaldığını doğrula:
+>      `"yargi-mcp": {"command": "<uvx tam yolu>", "args": ["--from", "git+https://github.com/hasankaracaoglan/yargi-mcp", "yargi-mcp"]}`
+> 3. Ortamı önceden kurup denemek için şunu çalıştır; bağımlılıkları indirir (bir iki dakika sürebilir) ve
+>    `ok` yazıp çıkar. Sunucunun kendisini terminalde çalıştırma, girdi bekleyip açık kalır:
+>    `<uvx tam yolu> --from git+https://github.com/hasankaracaoglan/yargi-mcp python -c "print('ok')"`
+> 4. Kullanıcıya asistan uygulamasını tamamen kapatıp yeniden açmasını söyle.
+>
+> Sunucu her açılışta GitHub'daki son sürümü kullanır; güncelleme için ayrıca bir şey yapmak gerekmez.
+>
+> **Elle kurulum (bu fork):** [uv](https://docs.astral.sh/uv/) kuruluysa MCP istemcisi sunucuyu doğrudan GitHub'dan çalıştırabilir
 > (Claude Desktop'ta `claude_desktop_config.json`):
 > ```json
 > {"mcpServers": {"yargi-mcp": {"command": "uvx", "args": ["--from", "git+https://github.com/hasankaracaoglan/yargi-mcp", "yargi-mcp"]}}}
