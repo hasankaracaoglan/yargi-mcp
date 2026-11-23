@@ -16,7 +16,13 @@
 > - Bedesten istekleri aynı makinedeki bütün sunucu süreçleri arasında ortak bir sırayla gönderilir; 429'da
 >   `Retry-After` beklenir.
 >
-> **Kurulum (bu fork):**
+> **Kurulum (bu fork):** [uv](https://docs.astral.sh/uv/) kuruluysa MCP istemcisi sunucuyu doğrudan GitHub'dan çalıştırabilir
+> (Claude Desktop'ta `claude_desktop_config.json`):
+> ```json
+> {"mcpServers": {"yargi-mcp": {"command": "uvx", "args": ["--from", "git+https://github.com/hasankaracaoglan/yargi-mcp", "yargi-mcp"]}}}
+> ```
+> Claude Desktop `uvx`'i bulamazsa `command` alanına tam yolunu yazın (Terminal'de `which uvx`, çoğunlukla `/Users/<kullanıcı>/.local/bin/uvx`).
+> Kaynaktan kurmak için:
 > ```bash
 > git clone https://github.com/hasankaracaoglan/yargi-mcp.git
 > cd yargi-mcp && python3 -m venv .venv && .venv/bin/pip install -e .
