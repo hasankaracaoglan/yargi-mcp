@@ -1,3 +1,31 @@
+> ## Bu depo hakkında
+>
+> Bu depo, [saidsurucu/yargi-mcp](https://github.com/saidsurucu/yargi-mcp) projesinin **bağımsız bir fork'udur** (MIT).
+> Asıl proje 28.10.2026'da kapatılıp ücretli Yargı PRO'ya taşındı. Bu depo, asıl projenin son açık sürümünü
+> (`upstream-son` etiketi) korur ve üzerine `yerel` dalındaki değişiklikleri ekler. Said Sürücü ile ya da
+> Yargı PRO ile bir bağlantısı yoktur. Aşağıdaki özgün README'de geçen uzak sunucu adresleri, PyPI paketi
+> ve Pro sürüm bilgileri asıl projeye aittir, bu fork için geçerli değildir.
+>
+> **Bu fork'taki başlıca değişiklikler (Bedesten):**
+> - Kararlara resmi künye alanı (`kunye`) ve künye kaydı; tarih gösterimindeki UTC kayması düzeltildi.
+> - Arama: `kök*` ile Türkçe ek genişletme, eğik çizgili esas/karar no düzeltmesi, alaka sırası varsayılan.
+> - Tek taraflı tarih filtresi artık çalışıyor; `GG.AA.YYYY` biçimi kabul ediliyor.
+> - `search_smart_decisions` 100 künyeyi alaka sırasıyla listeler; yeni `download_bedesten_documents` seçilen
+>   kararları yerel önbelleğe indirir, belge aracı önce önbelleğe bakar.
+> - Yeni `verify_bedesten_quote` aracı: dilekçedeki alıntıyı karar metniyle harfi harfine karşılaştırır.
+> - Bedesten istekleri aynı makinedeki bütün sunucu süreçleri arasında ortak bir sırayla gönderilir; 429'da
+>   `Retry-After` beklenir.
+>
+> **Kurulum (bu fork):**
+> ```bash
+> git clone https://github.com/hasankaracaoglan/yargi-mcp.git
+> cd yargi-mcp && python3 -m venv .venv && .venv/bin/pip install -e .
+> ```
+> MCP istemcisinde komut: `/tam/yol/yargi-mcp/.venv/bin/yargi-mcp`. Yerel veriler (künye kaydı, karar
+> önbelleği) `veri/` klasöründe tutulur ve depoya girmez.
+
+---
+
 # Yargı MCP: Türk Hukuk Kaynakları için MCP Sunucusu
 
 [![MCP Toplist](https://mcptoplist.com/badge/glama%2Fsaidsurucu%2Fyargi-mcp.svg)](https://mcptoplist.com/server/glama%2Fsaidsurucu%2Fyargi-mcp)
