@@ -33,8 +33,9 @@
 >    yollarını da dene. Yalnızca hiçbirinde yoksa kur. macOS/Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 >    Windows: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`.
 > 2. Sunucuyu kur (zaman aşımı en az 10 dakika olsun; "operation timed out" ile yarıda kalırsa bir kez daha çalıştır):
->    `UV_HTTP_TIMEOUT=180 <uv> tool install https://github.com/hasankaracaoglan/yargi-mcp/archive/refs/heads/yerel.zip`
-> 3. Komutun tam yolu `<uv> tool dir --bin` klasöründeki `yargi-mcp` dosyasıdır (çoğunlukla `~/.local/bin/yargi-mcp`; ayarlara
+>    `UV_HTTP_TIMEOUT=180 <uv> tool install --managed-python --python 3.12 https://github.com/hasankaracaoglan/yargi-mcp/archive/refs/heads/yerel.zip`
+> 3. uv'nin "... is not on your PATH" uyarısını yok say; `uv tool update-shell` çalıştırma.
+>    Komutun tam yolu `<uv> tool dir --bin` klasöründeki `yargi-mcp` dosyasıdır (çoğunlukla `~/.local/bin/yargi-mcp`; ayarlara
 >    açık yolu yaz). Masaüstü uygulamaları `~/.local/bin`'i PATH'te görmez. Bu yolu kullanıcının asistanına ekle:
 >    - **Claude Code:** `claude mcp add yargi-mcp -s user -- <tam yol>`
 >    - **Claude Desktop:** `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -46,14 +47,14 @@
 >      için izin al. Sunucunun kendisini terminalde çalıştırma; girdi bekleyip açık kalır.
 > 4. Kullanıcıya asistan uygulamasını tamamen kapatıp yeniden açmasını söyle.
 >
-> Güncelleme kendiliğinden olmaz. Güncellemek için: `UV_HTTP_TIMEOUT=180 <uv> tool install --reinstall --refresh https://github.com/hasankaracaoglan/yargi-mcp/archive/refs/heads/yerel.zip`,
+> Güncelleme kendiliğinden olmaz. Güncellemek için: `UV_HTTP_TIMEOUT=180 <uv> tool install --reinstall --refresh --managed-python --python 3.12 https://github.com/hasankaracaoglan/yargi-mcp/archive/refs/heads/yerel.zip`,
 > ardından asistan uygulamasını yeniden başlat. Kaldırmak için: `<uv> tool uninstall yargi-mcp` ve ayardaki girdiyi sil.
 >
 >
 > **Elle kurulum (bu fork):** Önce [uv](https://docs.astral.sh/uv/)'yi kurun (Terminal'de `curl -LsSf https://astral.sh/uv/install.sh | sh`), sonra sunucuyu kalıcı olarak kurun:
 >
 > ```bash
-> ~/.local/bin/uv tool install https://github.com/hasankaracaoglan/yargi-mcp/archive/refs/heads/yerel.zip
+> ~/.local/bin/uv tool install --managed-python --python 3.12 https://github.com/hasankaracaoglan/yargi-mcp/archive/refs/heads/yerel.zip
 > ```
 >
 > MCP istemcisinde komut olarak kurulan dosyanın tam yolunu yazın (Terminal'de `echo $HOME` ile kendi yolunuzu öğrenin), örneğin Claude Desktop'ta `claude_desktop_config.json`:
@@ -62,7 +63,7 @@
 > {"mcpServers": {"yargi-mcp": {"command": "/Users/KULLANICI/.local/bin/yargi-mcp", "args": []}}}
 > ```
 >
-> Güncellemek için `~/.local/bin/uv tool install --reinstall --refresh https://github.com/hasankaracaoglan/yargi-mcp/archive/refs/heads/yerel.zip` çalıştırıp istemciyi yeniden başlatın.
+> Güncellemek için `~/.local/bin/uv tool install --reinstall --refresh --managed-python --python 3.12 https://github.com/hasankaracaoglan/yargi-mcp/archive/refs/heads/yerel.zip` çalıştırıp istemciyi yeniden başlatın.
 >
 > Kaynaktan geliştirmek için:
 >
