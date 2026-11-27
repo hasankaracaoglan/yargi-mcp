@@ -61,7 +61,7 @@ MAX_PAGE_SIZE = 100
 MIN_TEXT, MAX_TEXT, MAX_WORDS = 3, 250, 30
 LOOKUP_TTL_S = 7 * 24 * 3600
 NEGATIVE_MATCH_TTL_S = 7 * 24 * 3600
-MAX_DAVA_TURU_IDS = 100
+MAX_DAVA_TURU_IDS = 50  # the server accepts at most 50 values per filter
 
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _NUMBER_IN_TEXT = re.compile(r"\b\d{4}\s*/\s*\d+\b")
@@ -342,7 +342,16 @@ class KarararamaClient:
             return [x for x in items if _daire_key(x["title"]) == key]
         key = fold(token)
         exact = [x for x in items if fold(x["title"]) == key]
-        if exact or kind == "il":
+        if kind == "il":
+            return exact
+        if kind == "dava_turu":
+            # One kind of case has several titles over the years: 'Kiralananın
+            # Tahliyesi' (old), 'Borçlar Yasasından Kaynaklanan (Kiralananın
+            # Tahliyesi)' (current), ... so every title containing the name is
+            # used; an exact title only wins when the name is too general.
+            hits = [x for x in items if key in fold(x["title"])]
+            return exact if exact and len(hits) > MAX_DAVA_TURU_IDS else hits
+        if exact:
             return exact
         return [x for x in items if key in fold(x["title"])]
 

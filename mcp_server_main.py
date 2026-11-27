@@ -1310,7 +1310,7 @@ async def search_yargitay_karararama(
 • Not supported: *, OR (search synonyms separately), esas/karar numbers in the text (use esas_no/karar_no)."""),
     daire: str = Field("", description="Chamber(s), comma-separated: '3. Hukuk Dairesi', H3, C8, HGK, CGK, BGK, HBK, CBK. Closed chambers by number ('15. Hukuk Dairesi')."),
     karar_turu: str = Field("", description="Outcome, comma-separated: BOZMA, ONAMA, RED, DÜŞME, 'DİRENME ÜZERİNE VERİLEN KARAR', 'KANUN YARARINA BOZMA', 'İTİRAZ KABUL', 'İTİRAZ RED', 'KARAR DÜZELTME', 'GERİ ÇEVİRME / TEVDİ', 'ZAMANAŞIMI - DÜŞME'"),
-    dava_turu: str = Field("", description="Dava/suç türü, part of its name, comma-separated: 'Kiralananın Tahliyesi', 'Kasten Yaralama', 'İşçilik Alacağı'"),
+    dava_turu: str = Field("", description="Dava/suç türü, comma-separated. Write the core name: every title containing it is used ('Kiralananın Tahliyesi' covers 'Borçlar Yasasından Kaynaklanan (Kiralananın Tahliyesi)' and older titles). Unsure of the name? Search without it and read the dava_turu of relevant hits. Decisions with no dava türü are left out."),
     gelen_mahkeme_turu: str = Field("", description="Type of the court the file came from: 'Bölge Adliye Mahkemesi Hukuk Dairesi', 'Asliye Ceza Mahkemesi', 'İş Mahkemesi', 'Sulh Hukuk Mahkemesi' ..."),
     il: str = Field("", description="Province the file came from, comma-separated: İzmir, İstanbul"),
     esas_no: str = Field("", description="Yargıtay esas number '2022/8423', or a year '2022'"),
@@ -1403,6 +1403,11 @@ async def search_yargitay_karararama(
     }
     if applied:
         result["filters"] = applied
+    if "dava_turu" in applied:
+        notes.append(
+            "dava_turu filtresi, dava türü kaydı olmayan kararları (kanun yararına bozma, BAM başkanlar kurulu, "
+            "bazı genel kurul kararları) dışarıda bırakır; bir aramayı da filtresiz yapın."
+        )
     if total > YARGITAY_MAX_RESULTS:
         notes.append(f"{total} sonuçtan yalnızca ilk {YARGITAY_MAX_RESULTS} tanesi görülebilir; filtre ekleyin.")
     if notes:
