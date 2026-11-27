@@ -1271,7 +1271,7 @@ async def _yargitay_bedesten_match(yargitay_id: str, kunye: dict) -> Tuple[Optio
         return None, f"Bedesten eşleştirmesi yapılamadı ({e.__class__.__name__}); tekrar deneyin."
 
 
-def _yargitay_kaynak_notu(document_id: Optional[str], match_error: Optional[str]) -> str:
+def _yargitay_kaynak_notu(yargitay_id: str, document_id: Optional[str], match_error: Optional[str]) -> str:
     if document_id:
         return (
             f"Bedesten karşılığı bulundu (documentId {document_id}). Alıntıyı verify_bedesten_quote ile bu "
@@ -1280,9 +1280,9 @@ def _yargitay_kaynak_notu(document_id: Optional[str], match_error: Optional[str]
     if match_error:
         return match_error
     return (
-        "Bu karar Bedesten'de (mevzuat.adalet.gov.tr) bulunamadı; mevzuat.adalet.gov.tr bağlantısı yok. "
-        "verify_bedesten_quote'a bu id verilirse alıntı Yargıtay sitesindeki metinle karşılaştırılır. "
-        "Kararın Yargıtay sitesindeki bağlantısı yargitay_url alanındadır."
+        "Bu karar Bedesten'de (mevzuat.adalet.gov.tr) bulunamadı. Kaynak satırı sitedeki bağlantıdır: "
+        f"(Kaynak: {yargitay_site_link(yargitay_id)}). Alıntıyı verify_bedesten_quote'a bu id'yi vererek "
+        "doğrulayın; Yargıtay sitesindeki metinle karşılaştırılır."
     )
 
 
@@ -1415,7 +1415,8 @@ async def search_yargitay_karararama(
         "Use this to read the full text of a decision found with search_yargitay_karararama (by its id). "
         "Returns the official kunye (use as is; never take the date from the text) and, when the same decision is on "
         "Bedesten, its bedesten_documentId and mevzuat.adalet.gov.tr source_url: cite that link and verify quotes with "
-        "verify_bedesten_quote. The match costs one Bedesten request the first time, then it is remembered."
+        "verify_bedesten_quote. When Bedesten has no copy (bedesten_documentId null), cite yargitay_url instead and pass "
+        "this id to verify_bedesten_quote. The match costs one Bedesten request the first time, then it is remembered."
     ),
     annotations={
         "readOnlyHint": True,
@@ -1456,7 +1457,7 @@ async def get_yargitay_karararama_document(
         "markdown_content": markdown,
     }
     if bedesten_eslestir:
-        result["kaynak_notu"] = _yargitay_kaynak_notu(document_id, match_error)
+        result["kaynak_notu"] = _yargitay_kaynak_notu(yargitay_id, document_id, match_error)
     return result
 
 
@@ -1900,7 +1901,7 @@ async def _verify_yargitay_quote(yargitay_id: str, quote: str) -> dict:
         "kunye": kunye["kunye"],
         "source_url": None,
         "yargitay_url": yargitay_site_link(yargitay_id),
-        "kaynak_notu": _yargitay_kaynak_notu(None, match_error),
+        "kaynak_notu": _yargitay_kaynak_notu(yargitay_id, None, match_error),
         **check_quote(text, quote),
     }
 
