@@ -2098,6 +2098,14 @@ build-backend = "setuptools.build_meta"
 
 ### Recent Updates
 
+#### ✅ Yargıtay Karar Arama rewrite (Completed - Nov 27, 2026)
+- **Issue**: karararama.yargitay.gov.tr was rebuilt as a React app; the old `POST /aramalist` (used by `yargitay_mcp_module/client.py`, tools still commented out) now returns the app's HTML.
+- **New backend**: public JSON API `https://karararama-services.yargitay.gov.tr` (no auth). Client: `yargitay_mcp_module/karararama.py` (endpoints, parameters, limits and measurements in its docstring).
+- **New tools**: `search_yargitay_karararama` (every word required; suffix/near-spelling tolerance; filters for chamber, karar türü, dava/suç türü, lower-court type, il, esas/karar no, date; 1-100 per page, first 1,000 hits only; `eslesme` marks FUZZY_ONLY hits) and `get_yargitay_karararama_document` (Markdown + official künye + the decision's Bedesten `documentId`/mevzuat.adalet.gov.tr link).
+- **Bedesten match**: chamber + esas + karar number, cached in `veri/kunye.sqlite3` table `yargitay_bedesten` (misses re-checked after 7 days). A second query (karar no, chamber, decision day) catches old general-assembly headers like `2010/15-193 E.`. 13/13 sampled decisions matched.
+- **verify_bedesten_quote** also accepts a karararama UUID: it checks the Bedesten copy, or the site's text when Bedesten has none. Texts of both sources were identical after whitespace normalisation.
+- Not a semantic search: an everyday-language query returns decisions that merely contain the words.
+
 #### ✅ BTK Module Added (Completed - Jul 4, 2026)
 - **PR**: #31 (ab-ihsanoglu) merged into `main` - adds `btk_mcp_module/` (client + models + `__init__`)
 - **Institution**: BTK (Bilgi Teknolojileri ve İletişim Kurumu / Information and Communication Technologies Authority) Board decisions

@@ -21,7 +21,7 @@ import json
 import time
 from collections import defaultdict
 from pydantic import HttpUrl, Field
-from typing import Optional, Dict, List, Literal, Any
+from typing import Optional, Dict, List, Literal, Any, Tuple
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 # Optional tiktoken import for token counting
@@ -258,6 +258,11 @@ def create_app():
 
 # --- Module Imports ---
 from yargitay_mcp_module.client import YargitayOfficialApiClient
+from yargitay_mcp_module.karararama import (
+    KarararamaClient, KarararamaError, MAX_RESULTS as YARGITAY_MAX_RESULTS, UUID_RE, kunye_of as yargitay_kunye_of,
+    parse_no as yargitay_parse_no, plain_snippet, prepare_text as yargitay_prepare_text,
+    site_link as yargitay_site_link,
+)
 from bedesten_mcp_module.client import BedestenApiClient, BedestenRateLimited, CONVERSION_ERROR_PREFIXES
 from bedesten_mcp_module.onbellek import get_text_cache
 from bedesten_mcp_module.models import (
@@ -266,7 +271,7 @@ from bedesten_mcp_module.models import (
 )
 from bedesten_mcp_module.enums import BirimAdiEnum
 from bedesten_mcp_module.kunye import format_kunye
-from bedesten_mcp_module.sorgu import date_range, rewrite_phrase
+from bedesten_mcp_module.sorgu import date_range, rewrite_phrase, _parse_day
 from bedesten_mcp_module.alinti import check_quote
 
 # Semantic Search Module Imports (enabled if any embedding provider is configured)
@@ -364,6 +369,7 @@ app = FastMCP(
 
 # --- API Client Instances ---
 yargitay_client_instance = YargitayOfficialApiClient()
+yargitay_karararama_client_instance = KarararamaClient()
 danistay_client_instance = DanistayApiClient()
 emsal_client_instance = EmsalApiClient()
 uyusmazlik_client_instance = UyusmazlikApiClient()
@@ -1241,6 +1247,219 @@ async def get_bedesten_document_markdown(
         raise
 
 
+# --- MCP Tools for Yargıtay Karar Arama (karararama.yargitay.gov.tr, renewed site) ---
+
+def _yargitay_day(value: str, label: str) -> Optional[str]:
+    if not value or not value.strip():
+        return None
+    try:
+        return _parse_day(value).isoformat()
+    except ValueError:
+        raise KarararamaError(f"{label} YYYY-MM-DD ya da GG.AA.YYYY olmalı: {value!r}") from None
+
+
+async def _yargitay_bedesten_match(yargitay_id: str, kunye: dict) -> Tuple[Optional[str], Optional[str]]:
+    """(Bedesten documentId, note when the match could not be tried)."""
+    try:
+        document_id = await yargitay_karararama_client_instance.bedesten_match(
+            yargitay_id, kunye, bedesten_client_instance
+        )
+        return document_id, None
+    except BedestenRateLimited as e:
+        return None, f"Bedesten eşleştirmesi yapılamadı (istek sınırı); {e.retry_after:.0f} sn sonra tekrar deneyin."
+    except httpx.HTTPError as e:
+        return None, f"Bedesten eşleştirmesi yapılamadı ({e.__class__.__name__}); tekrar deneyin."
+
+
+def _yargitay_kaynak_notu(document_id: Optional[str], match_error: Optional[str]) -> str:
+    if document_id:
+        return (
+            f"Bedesten karşılığı bulundu (documentId {document_id}). Alıntıyı verify_bedesten_quote ile bu "
+            f"documentId'yi vererek doğrulayın; kaynak satırı: (Kaynak: https://mevzuat.adalet.gov.tr/ictihat/{document_id})"
+        )
+    if match_error:
+        return match_error
+    return (
+        "Bu karar Bedesten'de (mevzuat.adalet.gov.tr) bulunamadı; mevzuat.adalet.gov.tr bağlantısı yok. "
+        "verify_bedesten_quote'a bu id verilirse alıntı Yargıtay sitesindeki metinle karşılaştırılır. "
+        "Kararın Yargıtay sitesindeki bağlantısı yargitay_url alanındadır."
+    )
+
+
+@app.tool(
+    description=(
+        "Use this to search Yargıtay decisions on Yargıtay's own site (karararama.yargitay.gov.tr). "
+        "Compared with Bedesten it finds suffixed forms and near spellings by itself (no * or OR needed) and filters by "
+        "karar türü (BOZMA, ONAMA ...), dava/suç türü, the lower court's type and il. It is NOT a semantic search: "
+        "every word is required, so write 2-4 legal terms, not a sentence. Returns id + kunye (official citation, use as is) "
+        "+ the matching passage; read the full text with get_yargitay_karararama_document. Shows at most 1,000 results per query. "
+        "eslesme 'yakın yazım' marks hits that only contain a similar word (tahliye -> tavsiye); they come last and are mostly noise. "
+        "Covers decisions from 2006 on; İçtihadı Birleştirme Kararları are not in it."
+    ),
+    annotations={
+        "readOnlyHint": True,
+        "openWorldHint": True,
+        "idempotentHint": True
+    }
+)
+async def search_yargitay_karararama(
+    arama: str = Field("", description="""Search text, 3-250 characters, at most 30 words; may be empty when a filter is given.
+• Every word is required: 'tahliye taahhütnamesi' finds decisions containing both. Long queries find little; keep 2-4 terms.
+• Suffixes and near spellings are matched automatically in short queries: 'taahütname' also finds 'taahhüdü'.
+• "exact phrase" in quotes; -word excludes: "tahliye taahhütnamesi" -icra
+• Not supported: *, OR (search synonyms separately), esas/karar numbers in the text (use esas_no/karar_no)."""),
+    daire: str = Field("", description="Chamber(s), comma-separated: '3. Hukuk Dairesi', H3, C8, HGK, CGK, BGK, HBK, CBK. Closed chambers by number ('15. Hukuk Dairesi')."),
+    karar_turu: str = Field("", description="Outcome, comma-separated: BOZMA, ONAMA, RED, DÜŞME, 'DİRENME ÜZERİNE VERİLEN KARAR', 'KANUN YARARINA BOZMA', 'İTİRAZ KABUL', 'İTİRAZ RED', 'KARAR DÜZELTME', 'GERİ ÇEVİRME / TEVDİ', 'ZAMANAŞIMI - DÜŞME'"),
+    dava_turu: str = Field("", description="Dava/suç türü, part of its name, comma-separated: 'Kiralananın Tahliyesi', 'Kasten Yaralama', 'İşçilik Alacağı'"),
+    gelen_mahkeme_turu: str = Field("", description="Type of the court the file came from: 'Bölge Adliye Mahkemesi Hukuk Dairesi', 'Asliye Ceza Mahkemesi', 'İş Mahkemesi', 'Sulh Hukuk Mahkemesi' ..."),
+    il: str = Field("", description="Province the file came from, comma-separated: İzmir, İstanbul"),
+    esas_no: str = Field("", description="Yargıtay esas number '2022/8423', or a year '2022'"),
+    karar_no: str = Field("", description="Yargıtay karar number '2023/291', or a year '2023'"),
+    kararTarihiStart: str = Field("", description="Earliest decision date, YYYY-MM-DD or GG.AA.YYYY"),
+    kararTarihiEnd: str = Field("", description="Latest decision date, YYYY-MM-DD or GG.AA.YYYY"),
+    sort_by: Literal["relevance", "date"] = Field("relevance", description="relevance (default) or date (newest first)"),
+    page: int = Field(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Field(20, ge=1, le=100, description="Results per page, 1-100; page x page_size may not exceed 1,000"),
+    snippets: bool = Field(True, description="Include the matching passage (~400 characters) per decision; false lists up to 100 künye cheaply"),
+) -> dict:
+    """Search Yargıtay decisions through karararama-services.yargitay.gov.tr."""
+    client = yargitay_karararama_client_instance
+    try:
+        text, notes = yargitay_prepare_text(arama)
+        params: Dict[str, Any] = {"page": page - 1, "size": page_size}
+        if text:
+            params["searchText"] = text
+        if sort_by == "date":
+            params["sortOrder"] = "tarih_desc"
+        applied: Dict[str, Any] = {}
+        for kind, value, param in (
+            ("daire", daire, "daireIds"),
+            ("karar_turu", karar_turu, "ustKararTuruIds"),
+            ("dava_turu", dava_turu, "davaTuruIds"),
+            ("mahkeme_turu", gelen_mahkeme_turu, "mahkemeTuruIds"),
+            ("il", il, "ilIds"),
+        ):
+            ids, titles = await client.resolve(kind, value)
+            if ids:
+                params[param] = ids
+                applied[kind] = titles if len(titles) <= 10 else titles[:10] + [f"... ({len(titles)} tür)"]
+        for label, value, prefix in (("esas_no", esas_no, "esas"), ("karar_no", karar_no, "karar")):
+            year, seq = yargitay_parse_no(value, label)
+            if year:
+                params[f"{prefix}YilMin"] = params[f"{prefix}YilMax"] = year
+                if seq:
+                    params[f"{prefix}SiraMin"] = params[f"{prefix}SiraMax"] = seq
+                applied[label] = value.strip()
+        start = _yargitay_day(kararTarihiStart, "kararTarihiStart")
+        end = _yargitay_day(kararTarihiEnd, "kararTarihiEnd")
+        if start:
+            params["kararTarihiMin"] = applied["kararTarihiStart"] = start
+        if end:
+            params["kararTarihiMax"] = applied["kararTarihiEnd"] = end
+        if not text and len(params) <= 2 + ("sortOrder" in params):
+            raise KarararamaError("Arama metni (en az 3 karakter) ya da en az bir filtre verin.")
+        if page * page_size > YARGITAY_MAX_RESULTS:
+            raise KarararamaError(
+                f"Yalnızca ilk {YARGITAY_MAX_RESULTS} sonuç görülebilir (sayfa x sayfa boyutu); filtre ekleyerek daraltın."
+            )
+
+        data = await client.search(params)
+    except KarararamaError as e:
+        return {"error": str(e), "total_records": 0, "decisions": []}
+    except httpx.HTTPError:
+        logger.exception("Error in tool 'search_yargitay_karararama'")
+        raise
+
+    total = data.get("totalElements") or 0
+    decisions = []
+    fuzzy = 0
+    for item in data.get("content") or []:
+        kunye = yargitay_kunye_of(item)
+        entry = {
+            "id": item.get("id"),
+            "kunye": kunye["kunye"],
+            "karar_turu": item.get("ustKararTuruTitle"),
+            "dava_turu": item.get("davaTuruTitle"),
+            "gelen_mahkeme": item.get("mahkemeAdi"),
+        }
+        if text and item.get("matchType"):
+            entry["eslesme"] = {"EXACT": "tam", "FUZZY_ONLY": "yakın yazım"}.get(item["matchType"], item["matchType"])
+            fuzzy += item["matchType"] == "FUZZY_ONLY"
+        if snippets:
+            entry["pasaj"] = plain_snippet(item.get("snippet"))
+        decisions.append(entry)
+    if fuzzy:
+        notes.append(
+            f"{fuzzy} sonuç 'yakın yazım': aranan kelime geçmiyor, yalnızca benzeri geçiyor "
+            "(örn. tahliye yerine tavsiye); çoğu ilgisizdir."
+        )
+    viewable = min(total, YARGITAY_MAX_RESULTS)
+    result: Dict[str, Any] = {
+        "total_records": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (viewable + page_size - 1) // page_size,
+        "decisions": decisions,
+    }
+    if applied:
+        result["filters"] = applied
+    if total > YARGITAY_MAX_RESULTS:
+        notes.append(f"{total} sonuçtan yalnızca ilk {YARGITAY_MAX_RESULTS} tanesi görülebilir; filtre ekleyin.")
+    if notes:
+        result["notes"] = notes
+    return result
+
+
+@app.tool(
+    description=(
+        "Use this to read the full text of a decision found with search_yargitay_karararama (by its id). "
+        "Returns the official kunye (use as is; never take the date from the text) and, when the same decision is on "
+        "Bedesten, its bedesten_documentId and mevzuat.adalet.gov.tr source_url: cite that link and verify quotes with "
+        "verify_bedesten_quote. The match costs one Bedesten request the first time, then it is remembered."
+    ),
+    annotations={
+        "readOnlyHint": True,
+        "idempotentHint": True
+    }
+)
+async def get_yargitay_karararama_document(
+    id: str = Field(..., description="Decision id (UUID) from search_yargitay_karararama"),
+    bedesten_eslestir: bool = Field(True, description="Find the same decision on Bedesten for the mevzuat.adalet.gov.tr link and quote verification"),
+) -> dict:
+    """Get a Yargıtay decision from karararama.yargitay.gov.tr as Markdown."""
+    yargitay_id = (id or "").strip()
+    if not UUID_RE.match(yargitay_id):
+        return {"error": "id, search_yargitay_karararama sonucundaki UUID olmalı (örn. b26260f2-a7b6-482a-bbe6-b0b908621e96)."}
+    client = yargitay_karararama_client_instance
+    try:
+        doc = await client.get_document(yargitay_id)
+    except KarararamaError as e:
+        return {"id": yargitay_id, "error": str(e)}
+    kunye = yargitay_kunye_of(doc)
+    markdown = await asyncio.to_thread(client.html_to_markdown, doc.get("kvtcontent") or "")
+    document_id, match_error = (None, None)
+    if bedesten_eslestir:
+        document_id, match_error = await _yargitay_bedesten_match(yargitay_id, kunye)
+    result = {
+        "id": yargitay_id,
+        "kunye": kunye["kunye"],
+        "mahkeme": kunye["mahkeme"],
+        "esas_no": kunye["esas_no"],
+        "karar_no": kunye["karar_no"],
+        "karar_tarihi": kunye["karar_tarihi"],
+        "karar_turu": doc.get("ustKararTuruTitle"),
+        "dava_turu": doc.get("davaTuruTitle"),
+        "gelen_mahkeme": doc.get("mahkemeAdi"),
+        "bedesten_documentId": document_id,
+        "source_url": f"https://mevzuat.adalet.gov.tr/ictihat/{document_id}" if document_id else None,
+        "yargitay_url": yargitay_site_link(yargitay_id),
+        "markdown_content": markdown,
+    }
+    if bedesten_eslestir:
+        result["kaynak_notu"] = _yargitay_kaynak_notu(document_id, match_error)
+    return result
+
+
 # --- Semantic Search Tool (Conditional - requires OPENROUTER_API_KEY) ---
 if SEMANTIC_SEARCH_AVAILABLE:
     @app.tool(
@@ -1642,7 +1861,9 @@ async def download_bedesten_documents(
         "are ignored, and '...' or '…' marks an omitted part. Result durum: TAM_ESLESME (verbatim), BICIM_FARKI "
         "(same words, different quotation mark/apostrophe/dash glyphs; kaynaktaki_parcalar gives the source "
         "form), ESLESMEDI (a part is not in the decision; en_yakin_kaynak_metni and farklar show the source "
-        "wording, benzerlik 0-1). Reads the cached text; downloads it if not cached. Not for AYM decisions."
+        "wording, benzerlik 0-1). Reads the cached text; downloads it if not cached. Not for AYM decisions. "
+        "Also accepts the id of a search_yargitay_karararama result: the decision's Bedesten copy is checked, "
+        "or the Yargıtay site's text when Bedesten has none."
     ),
     annotations={
         "readOnlyHint": True,
@@ -1650,13 +1871,41 @@ async def download_bedesten_documents(
     }
 )
 async def verify_bedesten_quote(
-    documentId: str = Field(..., description="documentId of the decision: the number at the end of its mevzuat.adalet.gov.tr/ictihat/ link"),
+    documentId: str = Field(..., description="documentId of the decision (the number at the end of its mevzuat.adalet.gov.tr/ictihat/ link), or the UUID id from search_yargitay_karararama"),
     quote: str = Field(..., description="The quotation exactly as written in the petition")
 ) -> dict:
     """Compares a petition quotation with the decision's full text."""
     doc_id = (documentId or "").strip()
     if not doc_id:
         raise ValueError("Document ID must be a non-empty string.")
+    if UUID_RE.match(doc_id):
+        return await _verify_yargitay_quote(doc_id, quote)
+    return await _verify_bedesten_quote(doc_id, quote)
+
+
+async def _verify_yargitay_quote(yargitay_id: str, quote: str) -> dict:
+    client = yargitay_karararama_client_instance
+    try:
+        doc = await client.get_document(yargitay_id)
+    except KarararamaError as e:
+        return {"durum": "HATA", "aciklama": str(e)}
+    kunye = yargitay_kunye_of(doc)
+    document_id, match_error = await _yargitay_bedesten_match(yargitay_id, kunye)
+    if document_id:
+        result = await _verify_bedesten_quote(document_id, quote)
+        return {"yargitay_id": yargitay_id, **result}
+    text = await asyncio.to_thread(client.html_to_markdown, doc.get("kvtcontent") or "")
+    return {
+        "yargitay_id": yargitay_id,
+        "kunye": kunye["kunye"],
+        "source_url": None,
+        "yargitay_url": yargitay_site_link(yargitay_id),
+        "kaynak_notu": _yargitay_kaynak_notu(None, match_error),
+        **check_quote(text, quote),
+    }
+
+
+async def _verify_bedesten_quote(doc_id: str, quote: str) -> dict:
     try:
         doc = await bedesten_client_instance.get_document_as_markdown(doc_id, resolve_kunye=True)
     except BedestenRateLimited as e:
@@ -1905,6 +2154,7 @@ def perform_cleanup():
         asyncio.set_event_loop(loop)
     clients_to_close = [
         globals().get('yargitay_client_instance'),
+        globals().get('yargitay_karararama_client_instance'),
         globals().get('danistay_client_instance'),
         globals().get('emsal_client_instance'),
         globals().get('uyusmazlik_client_instance'),
@@ -1981,43 +2231,13 @@ async def check_government_servers_health() -> Dict[str, Any]:
     
     health_results = {}
     
-    # Check Yargıtay server
+    # Check Yargıtay server (renewed site: karararama-services JSON API)
     try:
-        yargitay_payload = {
-            "data": {
-                "aranan": "karar",
-                "arananKelime": "karar", 
-                "pageSize": 10,
-                "pageNumber": 1
-            }
-        }
-        
-        async with httpx.AsyncClient(
-            headers={
-                "Accept": "*/*",
-                "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Connection": "keep-alive",
-                "Content-Type": "application/json; charset=UTF-8",
-                "Origin": "https://karararama.yargitay.gov.tr",
-                "Referer": "https://karararama.yargitay.gov.tr/",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors", 
-                "Sec-Fetch-Site": "same-origin",
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-                "X-Requested-With": "XMLHttpRequest"
-            },
-            timeout=30.0,
-            verify=False
-        ) as client:
-            response = await client.post(
-                "https://karararama.yargitay.gov.tr/aramalist",
-                json=yargitay_payload
-            )
-        
-        if response.status_code == 200:
-            response_data = response.json()
-            records_total = response_data.get("data", {}).get("recordsTotal", 0)
-            
+        response = await yargitay_karararama_client_instance.http_client.get("/api/kararlar/index-stats")
+
+        if response.status_code == 200 and "json" in response.headers.get("content-type", ""):
+            records_total = response.json().get("totalCount", 0)
+
             if records_total > 0:
                 health_results["yargitay"] = {
                     "status": "healthy",
@@ -2025,8 +2245,8 @@ async def check_government_servers_health() -> Dict[str, Any]:
                 }
             else:
                 health_results["yargitay"] = {
-                    "status": "unhealthy", 
-                    "reason": "recordsTotal is 0 or missing",
+                    "status": "unhealthy",
+                    "reason": "totalCount is 0 or missing",
                     "response_time_ms": response.elapsed.total_seconds() * 1000
                 }
         else:
